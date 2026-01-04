@@ -1,0 +1,1 @@
+export { TheoryPanel } from './TheoryPanel'
