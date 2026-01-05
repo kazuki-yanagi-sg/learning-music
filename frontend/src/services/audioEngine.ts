@@ -285,21 +285,21 @@ class AudioEngine {
         break
       case 'bass':
         if (this.soundfontsLoaded && this.sfBass) {
-          this.sfBass.play(pitch.toString(), undefined, { duration })
+          this.sfBass.play(note, undefined, { duration })
         } else {
           this.bass?.triggerAttackRelease(freq, duration)
         }
         break
       case 'keyboard':
         if (this.soundfontsLoaded && this.sfPiano) {
-          this.sfPiano.play(pitch.toString(), undefined, { duration })
+          this.sfPiano.play(note, undefined, { duration })
         } else {
           this.keyboard?.triggerAttackRelease(note, duration)
         }
         break
       case 'guitar':
         if (this.soundfontsLoaded && this.sfGuitar) {
-          this.sfGuitar.play(pitch.toString(), undefined, { duration })
+          this.sfGuitar.play(note, undefined, { duration })
         } else {
           this.guitar?.triggerAttackRelease(freq, duration)
         }
@@ -409,21 +409,21 @@ class AudioEngine {
         break
       case 'bass':
         if (this.soundfontsLoaded && this.sfBass) {
-          this.sfBass.play(note.pitch.toString(), time, { duration })
+          this.sfBass.play(noteName, time, { duration })
         } else {
           this.bass?.triggerAttackRelease(freq, duration, time)
         }
         break
       case 'keyboard':
         if (this.soundfontsLoaded && this.sfPiano) {
-          this.sfPiano.play(note.pitch.toString(), time, { duration })
+          this.sfPiano.play(noteName, time, { duration })
         } else {
           this.keyboard?.triggerAttackRelease(noteName, duration, time)
         }
         break
       case 'guitar':
         if (this.soundfontsLoaded && this.sfGuitar) {
-          this.sfGuitar.play(note.pitch.toString(), time, { duration })
+          this.sfGuitar.play(noteName, time, { duration })
         } else {
           this.guitar?.triggerAttackRelease(freq, duration, time)
         }
@@ -541,7 +541,7 @@ class AudioEngine {
             break
           case 'bass':
             if (this.soundfontsLoaded && this.sfBass) {
-              this.sfBass.play(note.pitch.toString(), time, { duration })
+              this.sfBass.play(noteName, time, { duration })
             } else {
               this.bass?.triggerAttackRelease(freq, duration, time)
             }
@@ -549,7 +549,7 @@ class AudioEngine {
           case 'other':
           case 'default':
             if (this.soundfontsLoaded && this.sfPiano) {
-              this.sfPiano.play(note.pitch.toString(), time, { duration })
+              this.sfPiano.play(noteName, time, { duration })
             } else {
               this.keyboard?.triggerAttackRelease(noteName, duration, time)
             }
@@ -640,7 +640,7 @@ class AudioEngine {
               break
             case 'bass':
               if (this.soundfontsLoaded && this.sfBass) {
-                this.sfBass.play(note.pitch.toString(), time, { duration })
+                this.sfBass.play(noteName, time, { duration })
               } else {
                 this.bass?.triggerAttackRelease(freq, duration, time)
               }
@@ -648,7 +648,7 @@ class AudioEngine {
             case 'other':
               // other（ギター/キーボード）はギター音源で再生
               if (this.soundfontsLoaded && this.sfGuitar) {
-                this.sfGuitar.play(note.pitch.toString(), time, { duration })
+                this.sfGuitar.play(noteName, time, { duration })
               } else {
                 this.keyboard?.triggerAttackRelease(noteName, duration, time)
               }
@@ -656,7 +656,7 @@ class AudioEngine {
             case 'melody':
               // メロディはピアノ音源で再生
               if (this.soundfontsLoaded && this.sfPiano) {
-                this.sfPiano.play(note.pitch.toString(), time, { duration })
+                this.sfPiano.play(noteName, time, { duration })
               } else {
                 this.keyboard?.triggerAttackRelease(noteName, duration, time)
               }
