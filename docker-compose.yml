@@ -10,8 +10,7 @@ services:
       - ./backend:/app
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY:-dummy}
-      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID:-dummy}
-      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET:-dummy}
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY:-dummy}
     command: pytest tests/ -v
     profiles:
       - test
@@ -27,26 +26,32 @@ services:
       - /app/node_modules
     environment:
       - VITE_API_URL=http://localhost:8000
-    depends_on:
-      - backend
 
+  # NOTE: ハイブリッド構成では backend はホストで実行
+  # Docker-only モード用に残してある（./start.sh 推奨）
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    container_name: anisong-backend
     ports:
       - "8000:8000"
     volumes:
       - ./backend:/app
       - ./lessons:/app/lessons
+      - ./storage/audio:/shared/audio
+      - ./storage/midi:/shared/midi
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
-      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - YOUTUBE_API_KEY=${YOUTUBE_API_KEY}
       - VOICEVOX_HOST=${VOICEVOX_HOST:-http://voicevox:50021}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
+      - ANISONG_AUDIO_DIR=/shared/audio
+      - ANISONG_MIDI_DIR=/shared/midi
     depends_on:
       - voicevox
+    profiles:
+      - docker-only
 
   voicevox:
     image: voicevox/voicevox_engine:cpu-ubuntu20.04-latest

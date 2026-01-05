@@ -20,6 +20,13 @@ export interface ChordInfo {
   chord: string
 }
 
+export interface NoteInfo {
+  pitch: number
+  start: number
+  end: number
+  velocity: number
+}
+
 export interface AnalysisResult {
   video_id: string
   title: string
@@ -29,6 +36,31 @@ export interface AnalysisResult {
   tempo: number | null
   duration: number | null
   notes_count: number
+  notes: NoteInfo[]
+  chords: ChordInfo[]
+  analysis_text: string | null
+}
+
+// 4トラック解析結果
+export interface TrackNotes {
+  notes: NoteInfo[]
+  midi_path: string | null
+  error: string | null
+}
+
+export interface FourTrackResult {
+  video_id: string
+  title: string
+  channel: string
+  thumbnail: string | null
+  url: string | null
+  tempo: number
+  tracks: {
+    drums: TrackNotes
+    bass: TrackNotes
+    other: TrackNotes
+    vocals: TrackNotes
+  }
   chords: ChordInfo[]
   analysis_text: string | null
 }
@@ -88,6 +120,21 @@ export async function analyzeVideo(videoId: string, generateAiAnalysis: boolean 
   }
 
   const json: ApiResponse<AnalysisResult> = await response.json()
+  return json.data
+}
+
+/**
+ * 曲を4トラックに分離して解析（Demucs + Gemini）
+ */
+export async function analyze4Tracks(videoId: string): Promise<FourTrackResult> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/song-analysis/analyze-4tracks/${videoId}`)
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Unknown error' }))
+    throw new Error(error.detail || '4-track analysis failed')
+  }
+
+  const json: ApiResponse<FourTrackResult> = await response.json()
   return json.data
 }
 

@@ -1,7 +1,7 @@
 """
 yt-dlp 音声ダウンロードサービス
 
-YouTubeからMP3をダウンロード
+YouTubeから音声（WAV）をダウンロード
 """
 import os
 import re
@@ -16,13 +16,18 @@ class AudioDownloaderService:
     """yt-dlp を使用した音声ダウンローダー"""
 
     def __init__(self):
-        # ダウンロード用の一時ディレクトリ
-        self.temp_dir = Path(tempfile.gettempdir()) / "anisong_audio"
-        self.temp_dir.mkdir(exist_ok=True)
+        # 共有ディレクトリを環境変数から優先取得
+        custom_dir = os.getenv("ANISONG_AUDIO_DIR")
+        if custom_dir:
+            self.temp_dir = Path(custom_dir)
+        else:
+            # ダウンロード用の一時ディレクトリ
+            self.temp_dir = Path(tempfile.gettempdir()) / "anisong_audio"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
 
     def download_audio(self, url: str) -> dict:
         """
-        YouTubeからMP3をダウンロード
+        YouTubeから音声（WAV）をダウンロード
 
         Args:
             url: YouTube動画のURL
@@ -36,7 +41,7 @@ class AudioDownloaderService:
         """
         # ユニークなファイル名を生成
         file_id = str(uuid.uuid4())
-        output_path = self.temp_dir / f"{file_id}.mp3"
+        output_path = self.temp_dir / f"{file_id}.wav"
 
         try:
             # yt-dlpコマンドを実行
@@ -45,8 +50,7 @@ class AudioDownloaderService:
                     "yt-dlp",
                     "--js-runtimes", "nodejs",  # Node.jsをJSランタイムとして使用
                     "-x",  # 音声のみ抽出
-                    "--audio-format", "mp3",
-                    "--audio-quality", "0",  # 最高品質
+                    "--audio-format", "wav",
                     "-o", str(output_path),
                     "--no-playlist",  # プレイリストは無視
                     "--quiet",
@@ -104,7 +108,7 @@ class AudioDownloaderService:
 
     def download_audio_with_progress(self, url: str) -> Generator[dict, None, None]:
         """
-        YouTubeからMP3をダウンロード（進捗付き）
+        YouTubeから音声（WAV）をダウンロード（進捗付き）
 
         Args:
             url: YouTube動画のURL
@@ -119,7 +123,7 @@ class AudioDownloaderService:
         """
         file_id = str(uuid.uuid4())
         output_template = str(self.temp_dir / f"{file_id}.%(ext)s")
-        output_path = self.temp_dir / f"{file_id}.mp3"
+        output_path = self.temp_dir / f"{file_id}.wav"
 
         try:
             process = subprocess.Popen(
@@ -127,8 +131,7 @@ class AudioDownloaderService:
                     "yt-dlp",
                     "--js-runtimes", "nodejs",  # Node.jsをJSランタイムとして使用
                     "-x",
-                    "--audio-format", "mp3",
-                    "--audio-quality", "0",
+                    "--audio-format", "wav",
                     "-o", output_template,
                     "--no-playlist",
                     "--newline",  # 進捗を行ごとに出力

@@ -24,11 +24,11 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# CORS設定
+# CORS設定（開発環境では全オリジンを許可）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("FRONTEND_URL", "http://localhost:5173")],
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,  # allow_origins=["*"] の場合は False に
     allow_methods=["*"],
     allow_headers=["*"],
 )

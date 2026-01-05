@@ -9,6 +9,8 @@ __all__ = [
     "get_audio_downloader_service",
     "get_magenta_service",
     "get_gemini_service",
+    "get_audio_separator_service",
+    "get_basic_pitch_service",
 ]
 
 
@@ -34,3 +36,15 @@ def get_gemini_service():
     """GeminiServiceを遅延インポートして取得"""
     from .gemini import get_gemini_service as _get_gemini_service
     return _get_gemini_service()
+
+
+def get_audio_separator_service():
+    """AudioSeparatorServiceを遅延インポートして取得"""
+    from .audio_separator import get_audio_separator_service as _get_audio_separator_service
+    return _get_audio_separator_service()
+
+
+def get_basic_pitch_service():
+    """BasicPitchServiceを遅延インポートして取得"""
+    from .basic_pitch_service import get_basic_pitch_service as _get_basic_pitch_service
+    return _get_basic_pitch_service()

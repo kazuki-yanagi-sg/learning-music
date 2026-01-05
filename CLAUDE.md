@@ -147,7 +147,8 @@ Backend (pytest):
 - **TTS:** VOICEVOX（音声読み上げ）
 - **楽曲検索:** YouTube Data API v3
 - **音声ダウンロード:** yt-dlp
-- **MIDI変換:** Magenta (onsets_frames)
+- **MIDI変換:** Basic Pitch（Spotify製オープンソース）
+- **楽器分離:** Demucs（Meta製、4トラック分離）
 
 ### 楽曲解析フロー（耳コピ・参照機能）
 
@@ -158,11 +159,12 @@ Backend (pytest):
 フロー:
 1. ユーザーが「この曲みたいなの作りたい」で検索（YouTube Data API v3）
 2. YouTube URLを取得
-3. yt-dlpでMP3ダウンロード
-4. Magenta (onsets_frames) でMIDI変換
-5. tonaljsでコード認識
-6. Geminiで解説生成
-7. ユーザーが参照しながら自分の曲を作成
+3. yt-dlpでWAVダウンロード
+4. Demucsで4トラック分離（drums/bass/other/vocals）
+5. Basic PitchでMIDI変換（各トラック）
+6. tonaljsでコード認識
+7. Geminiで解説生成
+8. ユーザーが参照しながら自分の曲を作成
 
 ✓ フル楽曲解析が可能:
   - イントロ〜アウトロまで全セクション
@@ -191,14 +193,17 @@ Backend (pytest):
                            ↓
                       yt-dlp（音声ダウンロード）
                            ↓
-                      Magenta（MIDI変換、Docker）
+                      Demucs（4トラック分離）
+                           ↓
+                      Basic Pitch（MIDI変換）
 ```
 
 - Frontend → Backend: REST API
 - Backend で API キーを管理（Gemini, YouTube）
 - VOICEVOX はバックエンド経由で呼び出し
 - yt-dlp でYouTubeから音声をダウンロード
-- Magenta (onsets_frames) でMIDI変換（Docker推奨）
+- Demucs で4トラック分離（ホスト実行、MPS対応）
+- Basic Pitch でMIDI変換（APIキー不要）
 
 ### 音楽理論解析の役割分担
 
@@ -307,14 +312,16 @@ C  C# D  D# E  F  F# G  G# A  A#  B
 │   │   │   ├── theory.py        # 理論解説API
 │   │   │   ├── tts.py           # VOICEVOX連携
 │   │   │   ├── exercise.py      # 演習API
-│   │   │   └── song_analysis.py # 楽曲解析API（YouTube/yt-dlp/Magenta）
+│   │   │   └── song_analysis.py # 楽曲解析API（YouTube/yt-dlp/Demucs/Basic Pitch）
 │   │   ├── services/
-│   │   │   ├── gemini.py        # Gemini API連携
+│   │   │   ├── gemini.py        # Gemini API連携（AI解説生成）
 │   │   │   ├── voicevox.py      # VOICEVOX連携
 │   │   │   ├── analyzer.py      # 音楽理論解析
 │   │   │   ├── youtube.py       # YouTube Data API連携（曲検索、URL取得）
-│   │   │   ├── audio_downloader.py  # yt-dlp連携（MP3ダウンロード）
-│   │   │   └── magenta.py       # Magenta連携（音声→MIDI変換）
+│   │   │   ├── audio_downloader.py  # yt-dlp連携（WAVダウンロード）
+│   │   │   ├── audio_separator.py   # Demucs連携（4トラック分離）
+│   │   │   ├── basic_pitch_service.py # Basic Pitch連携（音声→MIDI変換）
+│   │   │   └── magenta.py       # 統合サービス（コード認識等）
 │   │   ├── models/
 │   │   └── prompts/             # プロンプト管理（md形式）
 │   │       ├── SYSTEM_THEORY_EXPLAINER.md
@@ -354,6 +361,10 @@ C  C# D  D# E  F  F# G  G# A  A#  B
 │       ├── lesson8-5-section-arrange.json # セクション別
 │       ├── lesson8-6-chorus-complete.json # サビ完成
 │       └── lesson8-7-full-complete.json  # フル構成完成
+│
+├── docs/                    # ドキュメント
+│   ├── SONG_ANALYSIS.md     # 楽曲解析システムの技術詳細
+│   └── TROUBLESHOOTING.md   # よくある問題と解決方法
 │
 ├── docker-compose.yml
 └── README.md

@@ -55,3 +55,9 @@ def get_user_template(name: str) -> str:
 SONG_ANALYSIS_PROMPT = get_system_prompt("SONG_ANALYSIS")
 CHORD_ADVICE_PROMPT = get_system_prompt("CHORD_ADVISOR")
 PROGRESSION_PATTERN_PROMPT = get_system_prompt("PROGRESSION_PATTERN")
+AUDIO_TRANSCRIPTION_PROMPT = get_system_prompt("AUDIO_TRANSCRIPTION")
+
+# 楽器別トランスクリプション
+TRANSCRIBE_DRUMS_PROMPT = get_system_prompt("TRANSCRIBE_DRUMS")
+TRANSCRIBE_BASS_PROMPT = get_system_prompt("TRANSCRIBE_BASS")
+TRANSCRIBE_OTHER_PROMPT = get_system_prompt("TRANSCRIBE_OTHER")

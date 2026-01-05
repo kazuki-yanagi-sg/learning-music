@@ -139,3 +139,115 @@ class TestGeminiService:
 
             assert "失敗しました" in result
             assert "API Error" in result
+
+    def test_transcribe_audio_file_not_found(self):
+        """存在しない音声ファイルはエラー"""
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-api-key"}):
+            from app.services.gemini import GeminiService
+
+            service = GeminiService.__new__(GeminiService)
+            service.client = MagicMock()
+            service.model = "gemini-2.5-flash"
+
+            result = service.transcribe_audio("/nonexistent/audio.wav")
+
+            assert result["success"] is False
+            assert "not found" in result["error"].lower()
+
+    def test_transcribe_audio_success(self):
+        """音声ファイルの解析が成功"""
+        import tempfile
+        import os
+
+        mock_client = MagicMock()
+        mock_uploaded_file = MagicMock()
+        mock_client.files.upload.return_value = mock_uploaded_file
+
+        mock_response = Mock()
+        mock_response.text = '{"tempo": 140, "notes": [{"pitch": 60, "start": 0.0, "end": 0.5, "velocity": 80}]}'
+        mock_client.models.generate_content.return_value = mock_response
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            temp_path = f.name
+            f.write(b"dummy audio data")
+
+        try:
+            with patch.dict("os.environ", {"GEMINI_API_KEY": "test-api-key"}):
+                from app.services.gemini import GeminiService
+
+                service = GeminiService.__new__(GeminiService)
+                service.client = mock_client
+                service.model = "gemini-2.5-flash"
+
+                result = service.transcribe_audio(temp_path)
+
+                assert result["success"] is True
+                assert result["tempo"] == 140
+                assert len(result["notes"]) == 1
+                assert result["notes"][0]["pitch"] == 60
+        finally:
+            os.unlink(temp_path)
+
+    def test_transcribe_audio_json_with_markdown(self):
+        """マークダウンで囲まれたJSONレスポンスを処理"""
+        import tempfile
+        import os
+
+        mock_client = MagicMock()
+        mock_uploaded_file = MagicMock()
+        mock_client.files.upload.return_value = mock_uploaded_file
+
+        mock_response = Mock()
+        mock_response.text = '```json\n{"tempo": 120, "notes": []}\n```'
+        mock_client.models.generate_content.return_value = mock_response
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            temp_path = f.name
+            f.write(b"dummy audio data")
+
+        try:
+            with patch.dict("os.environ", {"GEMINI_API_KEY": "test-api-key"}):
+                from app.services.gemini import GeminiService
+
+                service = GeminiService.__new__(GeminiService)
+                service.client = mock_client
+                service.model = "gemini-2.5-flash"
+
+                result = service.transcribe_audio(temp_path)
+
+                assert result["success"] is True
+                assert result["tempo"] == 120
+        finally:
+            os.unlink(temp_path)
+
+    def test_transcribe_audio_invalid_json(self):
+        """無効なJSONレスポンスはエラー"""
+        import tempfile
+        import os
+
+        mock_client = MagicMock()
+        mock_uploaded_file = MagicMock()
+        mock_client.files.upload.return_value = mock_uploaded_file
+
+        mock_response = Mock()
+        mock_response.text = "これはJSONではありません"
+        mock_client.models.generate_content.return_value = mock_response
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            temp_path = f.name
+            f.write(b"dummy audio data")
+
+        try:
+            with patch.dict("os.environ", {"GEMINI_API_KEY": "test-api-key"}):
+                from app.services.gemini import GeminiService
+
+                service = GeminiService.__new__(GeminiService)
+                service.client = mock_client
+                service.model = "gemini-2.5-flash"
+
+                result = service.transcribe_audio(temp_path)
+
+                assert result["success"] is False
+                assert "JSON" in result["error"]
+        finally:
+            os.unlink(temp_path)

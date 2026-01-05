@@ -99,3 +99,56 @@ class TestYouTubeService:
 
         with pytest.raises(ValueError, match="YOUTUBE_API_KEY"):
             YouTubeService()
+
+    @patch.dict("os.environ", {"YOUTUBE_API_KEY": "test_key"})
+    @patch("app.services.youtube.build")
+    def test_search_music_skips_items_without_video_id(self, mock_build):
+        """videoIdがないアイテム（チャンネルなど）はスキップされる"""
+        from app.services.youtube import YouTubeService
+
+        mock_youtube = Mock()
+        mock_build.return_value = mock_youtube
+
+        # videoIdがあるアイテムとないアイテムが混在するレスポンス
+        mock_response = {
+            "items": [
+                {
+                    # videoIdがない（チャンネルやプレイリストの場合）
+                    "id": {"channelId": "channel123"},
+                    "snippet": {
+                        "title": "Channel Title",
+                        "channelTitle": "Channel Name",
+                        "thumbnails": {"default": {"url": "https://example.com/thumb.jpg"}},
+                        "publishedAt": "2024-01-01T00:00:00Z",
+                    },
+                },
+                {
+                    # 正常なvideoIdあり
+                    "id": {"videoId": "video456"},
+                    "snippet": {
+                        "title": "Video Title",
+                        "channelTitle": "Video Channel",
+                        "thumbnails": {"high": {"url": "https://example.com/thumb2.jpg"}},
+                        "publishedAt": "2024-01-02T00:00:00Z",
+                    },
+                },
+                {
+                    # idがない異常なケース
+                    "snippet": {
+                        "title": "Bad Item",
+                        "channelTitle": "Bad Channel",
+                        "thumbnails": {"default": {"url": "https://example.com/thumb3.jpg"}},
+                        "publishedAt": "2024-01-03T00:00:00Z",
+                    },
+                },
+            ]
+        }
+        mock_youtube.search().list().execute.return_value = mock_response
+
+        service = YouTubeService()
+        results = service.search_music("test query", limit=10)
+
+        # videoIdがあるアイテムのみ返される
+        assert len(results) == 1
+        assert results[0]["id"] == "video456"
+        assert results[0]["title"] == "Video Title"

@@ -7,10 +7,13 @@ import { useState, useCallback } from 'react'
 import {
   searchSongs,
   analyzeVideoWithProgress,
+  analyze4Tracks,
   YouTubeVideo,
   AnalysisResult,
+  FourTrackResult,
   AnalysisProgressEvent,
 } from '../../services/songAnalysisApi'
+import { AnalysisPianoRollModal } from '../AnalysisPianoRollModal/AnalysisPianoRollModal'
 
 interface SongSearchModalProps {
   isOpen: boolean
@@ -28,9 +31,12 @@ export function SongSearchModal({
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [videos, setVideos] = useState<YouTubeVideo[]>([])
   const [selectedVideo, setSelectedVideo] = useState<YouTubeVideo | null>(null)
-  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null)
+  const [analysisResult, setAnalysisResult] = useState<AnalysisResult | FourTrackResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [progress, setProgress] = useState<AnalysisProgressEvent | null>(null)
+  const [showPianoRollModal, setShowPianoRollModal] = useState(false)
+  const [analysisMode, setAnalysisMode] = useState<'standard' | '4track'>('standard')
+  const [showAnalysisOptions, setShowAnalysisOptions] = useState<YouTubeVideo | null>(null)
 
   // 検索実行
   const handleSearch = useCallback(async () => {
@@ -58,9 +64,11 @@ export function SongSearchModal({
   // 解析実行（SSEストリーミング）
   const handleAnalyze = useCallback((video: YouTubeVideo) => {
     setSelectedVideo(video)
+    setShowAnalysisOptions(null)
     setIsAnalyzing(true)
     setError(null)
     setAnalysisResult(null)
+    setAnalysisMode('standard')
     setProgress({ stage: 'init', progress: 0, message: '解析を開始しています...' })
 
     analyzeVideoWithProgress(video.id, (event) => {
@@ -76,6 +84,33 @@ export function SongSearchModal({
         setProgress(null)
       }
     }, true)
+  }, [])
+
+  // 4トラック解析実行（Demucs + Gemini）
+  const handle4TrackAnalyze = useCallback(async (video: YouTubeVideo) => {
+    setSelectedVideo(video)
+    setShowAnalysisOptions(null)
+    setIsAnalyzing(true)
+    setError(null)
+    setAnalysisResult(null)
+    setAnalysisMode('4track')
+    setProgress({ stage: 'init', progress: 0, message: '4トラック解析を開始...' })
+
+    try {
+      // 進捗更新（手動）
+      setProgress({ stage: 'download', progress: 10, message: '音声をダウンロード中...' })
+
+      // 4トラック解析APIを呼び出し
+      const result = await analyze4Tracks(video.id)
+
+      setAnalysisResult(result)
+      setIsAnalyzing(false)
+      setProgress(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '4トラック解析に失敗しました')
+      setIsAnalyzing(false)
+      setProgress(null)
+    }
   }, [])
 
   // 進行を適用
@@ -155,29 +190,49 @@ export function SongSearchModal({
             <div className="space-y-2">
               <h3 className="text-sm font-bold text-gray-400 mb-3">検索結果</h3>
               {videos.map((video) => (
-                <div
-                  key={video.id}
-                  className={`flex items-center gap-4 p-3 rounded cursor-pointer transition ${
-                    selectedVideo?.id === video.id
-                      ? 'bg-blue-900/50 border border-blue-700'
-                      : 'bg-gray-700/50 hover:bg-gray-700'
-                  }`}
-                  onClick={() => handleAnalyze(video)}
-                >
-                  {video.thumbnail && (
-                    <img
-                      src={video.thumbnail}
-                      alt={video.title}
-                      className="w-20 h-12 rounded object-cover"
-                    />
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <div className="font-bold text-white truncate">{video.title}</div>
-                    <div className="text-sm text-gray-400 truncate">{video.channel}</div>
+                <div key={video.id} className="relative">
+                  <div
+                    className={`flex items-center gap-4 p-3 rounded cursor-pointer transition ${
+                      showAnalysisOptions?.id === video.id
+                        ? 'bg-blue-900/50 border border-blue-700'
+                        : 'bg-gray-700/50 hover:bg-gray-700'
+                    }`}
+                    onClick={() => setShowAnalysisOptions(showAnalysisOptions?.id === video.id ? null : video)}
+                  >
+                    {video.thumbnail && (
+                      <img
+                        src={video.thumbnail}
+                        alt={video.title}
+                        className="w-20 h-12 rounded object-cover"
+                      />
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold text-white truncate">{video.title}</div>
+                      <div className="text-sm text-gray-400 truncate">{video.channel}</div>
+                    </div>
+                    <span className="text-xs px-2 py-1 bg-red-900 text-red-300 rounded">
+                      YouTube
+                    </span>
                   </div>
-                  <span className="text-xs px-2 py-1 bg-red-900 text-red-300 rounded">
-                    YouTube
-                  </span>
+                  {/* 解析オプション */}
+                  {showAnalysisOptions?.id === video.id && (
+                    <div className="mt-2 p-3 bg-gray-800 rounded border border-gray-600 flex flex-wrap gap-2">
+                      <button
+                        onClick={() => handleAnalyze(video)}
+                        className="flex-1 min-w-[140px] px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded text-white text-sm font-bold"
+                      >
+                        🎵 標準解析
+                        <span className="block text-xs font-normal opacity-70">ミックス全体をMIDI変換</span>
+                      </button>
+                      <button
+                        onClick={() => handle4TrackAnalyze(video)}
+                        className="flex-1 min-w-[140px] px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded text-white text-sm font-bold"
+                      >
+                        🎸 4トラック解析
+                        <span className="block text-xs font-normal opacity-70">楽器ごとに分離して解析</span>
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -211,23 +266,45 @@ export function SongSearchModal({
               </div>
 
               {/* ステージ表示 */}
-              <div className="flex gap-2 text-xs">
-                <span className={`px-2 py-1 rounded ${progress.stage === 'init' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
-                  初期化
-                </span>
-                <span className={`px-2 py-1 rounded ${progress.stage === 'download' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
-                  ダウンロード
-                </span>
-                <span className={`px-2 py-1 rounded ${progress.stage === 'convert' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
-                  MIDI変換
-                </span>
-                <span className={`px-2 py-1 rounded ${progress.stage === 'analyze' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
-                  コード解析
-                </span>
-                <span className={`px-2 py-1 rounded ${progress.stage === 'ai' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
-                  AI解説
-                </span>
-              </div>
+              {analysisMode === 'standard' ? (
+                <div className="flex gap-2 text-xs">
+                  <span className={`px-2 py-1 rounded ${progress.stage === 'init' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                    初期化
+                  </span>
+                  <span className={`px-2 py-1 rounded ${progress.stage === 'download' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                    ダウンロード
+                  </span>
+                  <span className={`px-2 py-1 rounded ${progress.stage === 'convert' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                    MIDI変換
+                  </span>
+                  <span className={`px-2 py-1 rounded ${progress.stage === 'analyze' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                    コード解析
+                  </span>
+                  <span className={`px-2 py-1 rounded ${progress.stage === 'ai' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                    AI解説
+                  </span>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center gap-2 text-xs">
+                  <div className="flex gap-2">
+                    <span className={`px-2 py-1 rounded ${progress.stage === 'init' ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                      初期化
+                    </span>
+                    <span className={`px-2 py-1 rounded ${progress.stage === 'download' ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                      ダウンロード
+                    </span>
+                    <span className={`px-2 py-1 rounded ${['convert', 'separate'].includes(progress.stage) ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                      Demucs分離
+                    </span>
+                    <span className={`px-2 py-1 rounded ${progress.stage === 'analyze' ? 'bg-purple-600 text-white' : 'bg-gray-700 text-gray-400'}`}>
+                      MIDI変換
+                    </span>
+                  </div>
+                  <p className="text-gray-400 mt-2">
+                    4トラック解析は数分かかります...
+                  </p>
+                </div>
+              )}
             </div>
           )}
 
@@ -244,7 +321,14 @@ export function SongSearchModal({
                   />
                 )}
                 <div>
-                  <h3 className="text-xl font-bold text-white">{analysisResult.title}</h3>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-xl font-bold text-white">{analysisResult.title}</h3>
+                    {'tracks' in analysisResult && (
+                      <span className="px-2 py-1 bg-purple-900 text-purple-300 rounded text-xs">
+                        4トラック
+                      </span>
+                    )}
+                  </div>
                   <p className="text-gray-400">{analysisResult.channel}</p>
                   <div className="flex gap-4 mt-2 text-sm">
                     {analysisResult.tempo && (
@@ -252,17 +336,63 @@ export function SongSearchModal({
                         {analysisResult.tempo} BPM
                       </span>
                     )}
-                    {analysisResult.duration && (
+                    {'duration' in analysisResult && analysisResult.duration && (
                       <span className="text-green-400">
                         {Math.floor(analysisResult.duration / 60)}:{String(Math.floor(analysisResult.duration % 60)).padStart(2, '0')}
                       </span>
                     )}
-                    <span className="text-yellow-400">
-                      {analysisResult.notes_count} ノート検出
-                    </span>
+                    {'notes_count' in analysisResult && (
+                      <span className="text-yellow-400">
+                        {analysisResult.notes_count} ノート検出
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
+
+              {/* 4トラック時のトラック情報 */}
+              {'tracks' in analysisResult && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-2 bg-red-900/30 rounded border border-red-800 flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-full bg-red-500" />
+                    <span className="text-red-300 text-sm">Drums:</span>
+                    <span className="text-white text-sm">{analysisResult.tracks.drums?.notes?.length || 0} ノート</span>
+                  </div>
+                  <div className="p-2 bg-green-900/30 rounded border border-green-800 flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-full bg-green-500" />
+                    <span className="text-green-300 text-sm">Bass:</span>
+                    <span className="text-white text-sm">{analysisResult.tracks.bass?.notes?.length || 0} ノート</span>
+                  </div>
+                  <div className="p-2 bg-blue-900/30 rounded border border-blue-800 flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-full bg-blue-500" />
+                    <span className="text-blue-300 text-sm">Guitar/Keys:</span>
+                    <span className="text-white text-sm">{analysisResult.tracks.other?.notes?.length || 0} ノート</span>
+                  </div>
+                  <div className="p-2 bg-purple-900/30 rounded border border-purple-800 flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-full bg-purple-500" />
+                    <span className="text-purple-300 text-sm">Vocals:</span>
+                    <span className="text-white text-sm">{analysisResult.tracks.vocals?.notes?.length || 0} ノート</span>
+                  </div>
+                </div>
+              )}
+
+              {/* ピアノロールで表示ボタン */}
+              {(('notes' in analysisResult && analysisResult.notes && analysisResult.notes.length > 0) ||
+                ('tracks' in analysisResult)) && (
+                <div>
+                  <button
+                    onClick={() => setShowPianoRollModal(true)}
+                    className={`w-full py-3 rounded text-white font-bold flex items-center justify-center gap-2 ${
+                      'tracks' in analysisResult
+                        ? 'bg-purple-600 hover:bg-purple-700'
+                        : 'bg-blue-600 hover:bg-blue-700'
+                    }`}
+                  >
+                    <span>🎹</span>
+                    ピアノロールで表示
+                  </button>
+                </div>
+              )}
 
               {/* コード進行 */}
               {analysisResult.chords.length > 0 && (
@@ -324,6 +454,15 @@ export function SongSearchModal({
           )}
         </div>
       </div>
+
+      {/* ピアノロール専用モーダル */}
+      {analysisResult && (
+        <AnalysisPianoRollModal
+          isOpen={showPianoRollModal}
+          onClose={() => setShowPianoRollModal(false)}
+          result={analysisResult}
+        />
+      )}
     </div>
   )
 }

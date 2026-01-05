@@ -86,37 +86,78 @@ class TestMagentaService:
         # 2つ以上のコードが検出されることを確認
         assert len(chords) >= 2
 
-    @patch("app.services.magenta.subprocess.run")
-    def test_audio_to_midi_file_not_found(self, mock_run):
+    def test_audio_to_midi_file_not_found(self):
         """存在しない音声ファイルはエラー"""
         from app.services.magenta import MagentaService
 
         service = MagentaService()
-        result = service.audio_to_midi("/nonexistent/audio.mp3")
+        result = service.audio_to_midi("/nonexistent/audio.wav")
 
         assert result["success"] is False
         assert "not found" in result["error"].lower()
 
-    @patch("app.services.magenta.subprocess.run")
-    def test_audio_to_midi_docker_not_found(self, mock_run):
-        """Dockerが見つからない場合"""
+    @patch("app.services.magenta.get_gemini_service")
+    def test_audio_to_midi_success(self, mock_get_gemini):
+        """Gemini APIで音声解析が成功"""
         from app.services.magenta import MagentaService
         import tempfile
         import os
 
         # テンポラリファイルを作成
-        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             temp_path = f.name
             f.write(b"dummy audio data")
 
         try:
-            mock_run.side_effect = FileNotFoundError()
+            # Geminiのモックをセットアップ
+            mock_gemini = Mock()
+            mock_gemini.transcribe_audio.return_value = {
+                "success": True,
+                "tempo": 120,
+                "notes": [
+                    {"pitch": 60, "start": 0.0, "end": 0.5, "velocity": 80},
+                    {"pitch": 64, "start": 0.5, "end": 1.0, "velocity": 80},
+                ],
+                "error": None,
+            }
+            mock_get_gemini.return_value = mock_gemini
+
+            service = MagentaService()
+            result = service.audio_to_midi(temp_path)
+
+            assert result["success"] is True
+            assert result["tempo"] == 120
+            assert len(result["notes"]) == 2
+            assert result["midi_path"] is not None
+        finally:
+            os.unlink(temp_path)
+
+    @patch("app.services.magenta.get_gemini_service")
+    def test_audio_to_midi_gemini_error(self, mock_get_gemini):
+        """Gemini APIがエラーを返す場合"""
+        from app.services.magenta import MagentaService
+        import tempfile
+        import os
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            temp_path = f.name
+            f.write(b"dummy audio data")
+
+        try:
+            mock_gemini = Mock()
+            mock_gemini.transcribe_audio.return_value = {
+                "success": False,
+                "tempo": None,
+                "notes": [],
+                "error": "Gemini API error",
+            }
+            mock_get_gemini.return_value = mock_gemini
 
             service = MagentaService()
             result = service.audio_to_midi(temp_path)
 
             assert result["success"] is False
-            assert "docker" in result["error"].lower()
+            assert "Gemini API error" in result["error"]
         finally:
             os.unlink(temp_path)
 

@@ -2,13 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# システム依存関係のインストール（yt-dlp, Docker CLI, Node.js用）
+# システム依存関係のインストール（yt-dlp, Docker CLI, 音声処理用）
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
     docker.io \
     nodejs \
     npm \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 # yt-dlpのインストール（最新版）

@@ -74,6 +74,6 @@ class TestAudioDownloaderService:
         from app.services.audio_downloader import AudioDownloaderService
 
         service = AudioDownloaderService()
-        result = service.cleanup("/nonexistent/path/file.mp3")
+        result = service.cleanup("/nonexistent/path/file.wav")
 
         assert result is False

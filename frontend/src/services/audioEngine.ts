@@ -347,6 +347,186 @@ class AudioEngine {
   }
 
   /**
+   * 解析結果のノートを再生（時間ベース）
+   *
+   * @param notes 再生するノート（start/endは秒単位）
+   * @param trackType トラック種別（デフォルト: keyboard）
+   * @param onProgress 進捗コールバック（秒単位）
+   * @returns 停止関数
+   */
+  playAnalysisNotes(
+    notes: Array<{ pitch: number; start: number; end: number; velocity?: number }>,
+    trackType: 'drums' | 'bass' | 'other' | 'default' = 'default',
+    onProgress?: (time: number) => void
+  ): { stop: () => void } {
+    if (!this.isInitialized) {
+      return { stop: () => {} }
+    }
+
+    this.stop()
+    this.isPlaying = true
+
+    const transport = Tone.getTransport()
+    transport.bpm.value = 60 // 1拍 = 1秒として扱う
+
+    // 各ノートをスケジュール
+    notes.forEach((note) => {
+      const startTime = note.start
+      const duration = Math.max(0.05, note.end - note.start)
+
+      const eventId = transport.schedule((time) => {
+        const freq = this.midiToFreq(note.pitch)
+        const noteName = this.midiToNote(note.pitch)
+
+        switch (trackType) {
+          case 'drums':
+            this.triggerDrumNote(note.pitch, time)
+            break
+          case 'bass':
+            this.bass?.triggerAttackRelease(freq, duration, time)
+            break
+          case 'other':
+          case 'default':
+            this.keyboard?.triggerAttackRelease(noteName, duration, time)
+            break
+        }
+      }, startTime)
+
+      this.scheduledEvents.push(eventId)
+    })
+
+    // 進捗コールバック用のインターバル
+    let progressInterval: number | null = null
+    if (onProgress) {
+      progressInterval = window.setInterval(() => {
+        if (this.isPlaying) {
+          const seconds = transport.seconds
+          onProgress(seconds)
+        }
+      }, 50)
+    }
+
+    // 曲の終わりを検出
+    const maxTime = Math.max(...notes.map((n) => n.end)) + 1
+    const endEventId = transport.schedule(() => {
+      this.stop()
+      if (progressInterval) {
+        clearInterval(progressInterval)
+      }
+      if (onProgress) {
+        onProgress(0)
+      }
+    }, maxTime)
+    this.scheduledEvents.push(endEventId)
+
+    transport.start()
+
+    return {
+      stop: () => {
+        this.stop()
+        if (progressInterval) {
+          clearInterval(progressInterval)
+        }
+      },
+    }
+  }
+
+  /**
+   * 4トラックの解析結果を再生
+   */
+  play4TrackAnalysis(
+    tracks: {
+      drums?: Array<{ pitch: number; start: number; end: number }>;
+      bass?: Array<{ pitch: number; start: number; end: number }>;
+      other?: Array<{ pitch: number; start: number; end: number }>;
+    },
+    mutedTracks: Set<string> = new Set(),
+    onProgress?: (time: number) => void
+  ): { stop: () => void } {
+    if (!this.isInitialized) {
+      return { stop: () => {} }
+    }
+
+    this.stop()
+    this.isPlaying = true
+
+    const transport = Tone.getTransport()
+    transport.bpm.value = 60
+
+    // 各トラックのノートをスケジュール
+    const scheduleTrack = (
+      notes: Array<{ pitch: number; start: number; end: number }> | undefined,
+      trackType: 'drums' | 'bass' | 'other'
+    ) => {
+      if (!notes || mutedTracks.has(trackType)) return
+
+      notes.forEach((note) => {
+        const startTime = note.start
+        const duration = Math.max(0.05, note.end - note.start)
+
+        const eventId = transport.schedule((time) => {
+          const freq = this.midiToFreq(note.pitch)
+          const noteName = this.midiToNote(note.pitch)
+
+          switch (trackType) {
+            case 'drums':
+              this.triggerDrumNote(note.pitch, time)
+              break
+            case 'bass':
+              this.bass?.triggerAttackRelease(freq, duration, time)
+              break
+            case 'other':
+              this.keyboard?.triggerAttackRelease(noteName, duration, time)
+              break
+          }
+        }, startTime)
+
+        this.scheduledEvents.push(eventId)
+      })
+    }
+
+    scheduleTrack(tracks.drums, 'drums')
+    scheduleTrack(tracks.bass, 'bass')
+    scheduleTrack(tracks.other, 'other')
+
+    // 進捗コールバック
+    let progressInterval: number | null = null
+    if (onProgress) {
+      progressInterval = window.setInterval(() => {
+        if (this.isPlaying) {
+          onProgress(transport.seconds)
+        }
+      }, 50)
+    }
+
+    // 曲の終わりを検出
+    const allNotes = [
+      ...(tracks.drums || []),
+      ...(tracks.bass || []),
+      ...(tracks.other || []),
+    ]
+    const maxTime = allNotes.length > 0 ? Math.max(...allNotes.map((n) => n.end)) + 1 : 0
+
+    if (maxTime > 0) {
+      const endEventId = transport.schedule(() => {
+        this.stop()
+        if (progressInterval) clearInterval(progressInterval)
+        if (onProgress) onProgress(0)
+      }, maxTime)
+      this.scheduledEvents.push(endEventId)
+    }
+
+    transport.start()
+
+    return {
+      stop: () => {
+        this.stop()
+        if (progressInterval) clearInterval(progressInterval)
+      },
+    }
+  }
+
+  /**
    * 破棄
    */
   dispose(): void {

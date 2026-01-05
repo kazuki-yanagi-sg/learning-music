@@ -40,6 +40,10 @@ class YouTubeService:
 
         videos = []
         for item in response.get("items", []):
+            # videoIdがない項目はスキップ（チャンネルやプレイリストの可能性）
+            if "videoId" not in item.get("id", {}):
+                continue
+
             video_id = item["id"]["videoId"]
             snippet = item["snippet"]
             video = {

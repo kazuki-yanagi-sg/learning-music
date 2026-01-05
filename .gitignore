@@ -37,3 +37,4 @@ htmlcov/
 # Misc
 *.bak
 *.tmp
+storage/

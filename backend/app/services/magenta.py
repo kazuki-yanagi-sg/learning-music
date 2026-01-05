@@ -1,27 +1,34 @@
 """
-Magenta 音声→MIDI変換サービス
+音声→MIDI変換サービス
 
-Docker経由でonsets_framesモデルを使用
+Demucsで楽器分離 → Basic Pitchで各トラックをMIDI変換
 """
 import os
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
 
 import mido
 
+from app.services.basic_pitch_service import get_basic_pitch_service
+from app.services.audio_separator import get_audio_separator_service
+
 
 class MagentaService:
-    """Magenta onsets_frames を使用した音声→MIDI変換"""
+    """Basic Pitchを使用した音声→ノート変換"""
 
     def __init__(self):
-        self.temp_dir = Path(tempfile.gettempdir()) / "anisong_midi"
-        self.temp_dir.mkdir(exist_ok=True)
+        # MIDI出力ディレクトリ（共有ディレクトリを優先）
+        custom_midi_dir = os.getenv("ANISONG_MIDI_DIR")
+        if custom_midi_dir:
+            self.temp_dir = Path(custom_midi_dir)
+        else:
+            self.temp_dir = Path(tempfile.gettempdir()) / "anisong_midi"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
 
     def audio_to_midi(self, audio_path: str) -> dict:
         """
-        音声ファイルをMIDIに変換
+        音声ファイルをMIDIに変換（Basic Pitchを使用）
 
         Args:
             audio_path: 音声ファイルのパス
@@ -30,6 +37,8 @@ class MagentaService:
             {
                 "success": True/False,
                 "midi_path": MIDIファイルのパス,
+                "notes": ノート情報のリスト,
+                "tempo": テンポ（BPM）- Basic Pitchはテンポ検出しないため120固定,
                 "error": エラーメッセージ（失敗時）
             }
         """
@@ -38,69 +47,201 @@ class MagentaService:
             return {
                 "success": False,
                 "midi_path": None,
+                "notes": [],
+                "tempo": None,
                 "error": f"Audio file not found: {audio_path}",
             }
 
-        # 出力MIDIファイルのパス
-        midi_filename = audio_path.stem + ".mid"
-        midi_path = self.temp_dir / midi_filename
-
         try:
-            # Dockerコンテナでonsets_framesを実行
-            result = subprocess.run(
-                [
-                    "docker", "run", "--rm",
-                    "-v", f"{audio_path.parent}:/input:ro",
-                    "-v", f"{self.temp_dir}:/output",
-                    "tensorflow/magenta:latest",
-                    "onsets_frames_transcription_transcribe",
-                    "--model_dir=/magenta-models/onsets_frames_transcription",
-                    f"--audio_file=/input/{audio_path.name}",
-                    f"--output_file=/output/{midi_filename}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=600,  # 10分タイムアウト
-            )
+            # Basic Pitchで音声を分析
+            basic_pitch = get_basic_pitch_service()
+            result = basic_pitch.transcribe_audio(str(audio_path))
 
-            if result.returncode != 0:
+            if not result["success"]:
                 return {
                     "success": False,
                     "midi_path": None,
-                    "error": result.stderr or "Magenta transcription failed",
+                    "notes": [],
+                    "tempo": None,
+                    "error": result["error"],
                 }
 
-            if not midi_path.exists():
-                return {
-                    "success": False,
-                    "midi_path": None,
-                    "error": "MIDI file not generated",
-                }
+            notes = result["notes"]
+            tempo = result["tempo"] or 120  # Basic Pitchはテンポ検出しないため120をデフォルト
+
+            # ノート情報をMIDIファイルに変換
+            midi_filename = audio_path.stem + ".mid"
+            midi_path = self.temp_dir / midi_filename
+
+            self._notes_to_midi(notes, tempo, midi_path)
 
             return {
                 "success": True,
                 "midi_path": str(midi_path),
+                "notes": notes,
+                "tempo": tempo,
                 "error": None,
             }
 
-        except subprocess.TimeoutExpired:
-            return {
-                "success": False,
-                "midi_path": None,
-                "error": "Transcription timed out",
-            }
-        except FileNotFoundError:
-            return {
-                "success": False,
-                "midi_path": None,
-                "error": "Docker not found. Please install Docker.",
-            }
         except Exception as e:
             return {
                 "success": False,
                 "midi_path": None,
-                "error": str(e),
+                "notes": [],
+                "tempo": None,
+                "error": f"Audio transcription failed: {str(e)}",
             }
+
+    def _notes_to_midi(self, notes: list[dict], tempo: int, midi_path: Path) -> None:
+        """
+        ノート情報をMIDIファイルに変換
+
+        Args:
+            notes: ノート情報のリスト
+            tempo: テンポ（BPM）
+            midi_path: 出力MIDIファイルのパス
+        """
+        mid = mido.MidiFile()
+        track = mido.MidiTrack()
+        mid.tracks.append(track)
+
+        # テンポを設定
+        tempo_microseconds = mido.bpm2tempo(tempo)
+        track.append(mido.MetaMessage("set_tempo", tempo=tempo_microseconds, time=0))
+
+        ticks_per_beat = mid.ticks_per_beat
+
+        # ノートをイベントに変換
+        events = []
+        for note in notes:
+            pitch = note.get("pitch", 60)
+            start = note.get("start", 0)
+            end = note.get("end", start + 0.5)
+            velocity = note.get("velocity", 80)
+
+            # 時間をティックに変換
+            start_ticks = int(mido.second2tick(start, ticks_per_beat, tempo_microseconds))
+            end_ticks = int(mido.second2tick(end, ticks_per_beat, tempo_microseconds))
+
+            events.append((start_ticks, "note_on", pitch, velocity))
+            events.append((end_ticks, "note_off", pitch, 0))
+
+        # イベントを時間順にソート
+        events.sort(key=lambda x: (x[0], x[1] == "note_on"))
+
+        # 相対時間に変換してトラックに追加
+        last_tick = 0
+        for tick, msg_type, pitch, velocity in events:
+            delta = tick - last_tick
+            if msg_type == "note_on":
+                track.append(mido.Message("note_on", note=pitch, velocity=velocity, time=delta))
+            else:
+                track.append(mido.Message("note_off", note=pitch, velocity=0, time=delta))
+            last_tick = tick
+
+        mid.save(midi_path)
+
+    def audio_to_4tracks(self, audio_path: str) -> dict:
+        """
+        音声ファイルを4トラックに分離してMIDI変換
+
+        Args:
+            audio_path: 音声ファイルのパス
+
+        Returns:
+            {
+                "success": True/False,
+                "tempo": テンポ（BPM）,
+                "tracks": {
+                    "drums": {"notes": [...], "midi_path": "..."},
+                    "bass": {"notes": [...], "midi_path": "..."},
+                    "other": {"notes": [...], "midi_path": "..."},  # ギター/キーボード
+                    "vocals": {"notes": [], "midi_path": None},  # 使用しない
+                },
+                "error": エラーメッセージ（失敗時）
+            }
+        """
+        audio_path = Path(audio_path)
+        if not audio_path.exists():
+            return {
+                "success": False,
+                "tempo": None,
+                "tracks": {},
+                "error": f"Audio file not found: {audio_path}",
+            }
+
+        separated_tracks = None
+
+        try:
+            # 1. Demucsで楽器分離
+            separator = get_audio_separator_service()
+            sep_result = separator.separate(str(audio_path))
+
+            if not sep_result["success"]:
+                return {
+                    "success": False,
+                    "tempo": None,
+                    "tracks": {},
+                    "error": f"Separation failed: {sep_result['error']}",
+                }
+
+            separated_tracks = sep_result["tracks"]
+
+            # 2. 各トラックをMIDI変換（Basic Pitch）
+            basic_pitch = get_basic_pitch_service()
+            tracks = {}
+            tempo = 120  # デフォルト
+
+            for track_type, track_path in separated_tracks.items():
+                result = basic_pitch.transcribe_track(track_path, track_type)
+
+                if result["success"]:
+                    notes = result["notes"]
+                    track_tempo = result["tempo"]
+
+                    # テンポは最初に検出されたものを使用
+                    if track_tempo and track_tempo != 120:
+                        tempo = track_tempo
+
+                    # MIDIファイルを生成
+                    midi_path = None
+                    if notes:
+                        midi_filename = f"{audio_path.stem}_{track_type}.mid"
+                        midi_path = self.temp_dir / midi_filename
+                        self._notes_to_midi(notes, tempo, midi_path)
+                        midi_path = str(midi_path)
+
+                    tracks[track_type] = {
+                        "notes": notes,
+                        "midi_path": midi_path,
+                    }
+                else:
+                    tracks[track_type] = {
+                        "notes": [],
+                        "midi_path": None,
+                        "error": result["error"],
+                    }
+
+            return {
+                "success": True,
+                "tempo": tempo,
+                "tracks": tracks,
+                "error": None,
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "tempo": None,
+                "tracks": {},
+                "error": f"4-track conversion failed: {str(e)}",
+            }
+
+        finally:
+            # 分離したトラックをクリーンアップ
+            if separated_tracks:
+                separator = get_audio_separator_service()
+                separator.cleanup(separated_tracks)
 
     def parse_midi(self, midi_path: str) -> dict:
         """
