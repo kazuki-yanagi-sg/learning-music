@@ -18,9 +18,11 @@ class LibrosaTranscriber:
     def __init__(self):
         # ボーカル用パラメータ
         self.vocal_fmin = 80    # Hz (E2あたり)
-        self.vocal_fmax = 1000  # Hz (B5あたり)
-        self.min_note_duration = 0.03  # 秒（さらに緩和）
-        self.voiced_threshold = 0.1   # 有声判定しきい値（さらに緩和）
+        self.vocal_fmax = 2000  # Hz (B6あたり) - 女性ボーカル対応
+        self.min_note_duration = 0.02  # 秒（短いノートも拾う）
+        self.voiced_threshold = 0.05  # 有声判定しきい値（さらに緩和）
+        self.pitch_tolerance = 1  # 半音（ビブラート許容）
+        self.gap_tolerance = 0.05  # 秒（この時間以内のギャップは無視）
 
         # ドラム用パラメータ
         self.drum_map = {
@@ -115,6 +117,7 @@ class LibrosaTranscriber:
     ) -> list[dict]:
         """
         連続ピッチデータをノートイベントに変換
+        ビブラート許容・ギャップブリッジ対応
         """
         notes = []
 
@@ -127,23 +130,35 @@ class LibrosaTranscriber:
         # ノートをグループ化
         current_note = None
         current_start = None
+        current_end = None
         current_pitches = []
         current_probs = []
+        gap_start = None  # ギャップ開始時刻
 
         for i, (t, pitch, prob) in enumerate(zip(times, midi_pitches, voiced_probs)):
-            if pitch < 0 or np.isnan(prob) or prob < self.voiced_threshold:
-                # 無効なフレーム - 現在のノートを終了
-                if current_note is not None and len(current_pitches) > 0:
-                    note = self._finalize_note(
-                        current_note, current_start, times[i-1],
-                        current_pitches, current_probs, tempo
-                    )
-                    if note:
-                        notes.append(note)
-                    current_note = None
-                    current_start = None
-                    current_pitches = []
-                    current_probs = []
+            is_valid = pitch >= 0 and not np.isnan(prob) and prob >= self.voiced_threshold
+
+            if not is_valid:
+                # 無効なフレーム
+                if current_note is not None:
+                    if gap_start is None:
+                        # ギャップ開始
+                        gap_start = t
+                        current_end = times[i-1] if i > 0 else t
+                    elif t - gap_start > self.gap_tolerance:
+                        # ギャップが長すぎる - ノートを終了
+                        note = self._finalize_note(
+                            current_note, current_start, current_end,
+                            current_pitches, current_probs, tempo
+                        )
+                        if note:
+                            notes.append(note)
+                        current_note = None
+                        current_start = None
+                        current_end = None
+                        current_pitches = []
+                        current_probs = []
+                        gap_start = None
             else:
                 rounded_pitch = round(pitch)
 
@@ -151,35 +166,61 @@ class LibrosaTranscriber:
                     # 新しいノート開始
                     current_note = rounded_pitch
                     current_start = t
+                    current_end = t
                     current_pitches = [pitch]
                     current_probs = [prob]
-                elif rounded_pitch == current_note:
-                    # 同じノートが続く（完全一致のみ）
+                    gap_start = None
+                elif abs(rounded_pitch - current_note) <= self.pitch_tolerance:
+                    # 同じノートが続く（ビブラート許容）
                     current_pitches.append(pitch)
                     current_probs.append(prob)
+                    current_end = t
+                    gap_start = None  # ギャップ解消
                 else:
                     # 新しいノートに変わった
                     note = self._finalize_note(
-                        current_note, current_start, times[i-1],
+                        current_note, current_start, current_end,
                         current_pitches, current_probs, tempo
                     )
                     if note:
                         notes.append(note)
                     current_note = rounded_pitch
                     current_start = t
+                    current_end = t
                     current_pitches = [pitch]
                     current_probs = [prob]
+                    gap_start = None
 
         # 最後のノートを追加
-        if current_note is not None and len(current_pitches) > 0 and len(times) > 0:
+        if current_note is not None and len(current_pitches) > 0:
             note = self._finalize_note(
-                current_note, current_start, times[-1],
+                current_note, current_start, current_end or times[-1],
                 current_pitches, current_probs, tempo
             )
             if note:
                 notes.append(note)
 
+        # 近接ノートをマージ（同じピッチで短いギャップ）
+        notes = self._merge_nearby_notes(notes)
+
         return notes
+
+    def _merge_nearby_notes(self, notes: list[dict]) -> list[dict]:
+        """同じピッチの近接ノートをマージ"""
+        if len(notes) < 2:
+            return notes
+
+        merged = [notes[0]]
+        for note in notes[1:]:
+            prev = merged[-1]
+            gap = note["start"] - prev["end"]
+            # 同じピッチで短いギャップならマージ
+            if note["pitch"] == prev["pitch"] and gap <= self.gap_tolerance:
+                prev["end"] = note["end"]
+                prev["velocity"] = max(prev["velocity"], note["velocity"])
+            else:
+                merged.append(note)
+        return merged
 
     def _finalize_note(
         self,
