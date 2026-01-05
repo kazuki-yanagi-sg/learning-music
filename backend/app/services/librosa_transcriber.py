@@ -65,8 +65,9 @@ class LibrosaTranscriber:
                     "error": "Audio file is empty",
                 }
 
-            # pyinでピッチ推定
+            # pyinでピッチ推定（高解像度）
             print(f"[Librosa] Running pyin for melody extraction...")
+            hop_length = 128  # 最高解像度（デフォルト512）
             # f0: 基本周波数（Hz）、voiced_flag: 有声/無声フラグ
             f0, voiced_flag, voiced_probs = librosa.pyin(
                 y,
@@ -74,11 +75,16 @@ class LibrosaTranscriber:
                 fmax=self.vocal_fmax,
                 sr=sr,
                 frame_length=2048,
-                hop_length=512,
+                hop_length=hop_length,
+                fill_na=None,  # NaNを残して後処理で対応
             )
 
             # 時間軸
-            times = librosa.times_like(f0, sr=sr, hop_length=512)
+            times = librosa.times_like(f0, sr=sr, hop_length=hop_length)
+
+            # デバッグ: 有声フレーム数
+            voiced_count = np.sum(voiced_flag) if voiced_flag is not None else 0
+            print(f"[Librosa] Total frames: {len(f0)}, voiced frames: {voiced_count}")
 
             # ピッチをノートに変換
             notes = self._f0_to_notes(f0, voiced_flag, voiced_probs, times, tempo)
@@ -147,8 +153,8 @@ class LibrosaTranscriber:
                     current_start = t
                     current_pitches = [pitch]
                     current_probs = [prob]
-                elif abs(rounded_pitch - current_note) <= 1:
-                    # 同じノートが続く（半音以内）
+                elif rounded_pitch == current_note:
+                    # 同じノートが続く（完全一致のみ）
                     current_pitches.append(pitch)
                     current_probs.append(prob)
                 else:

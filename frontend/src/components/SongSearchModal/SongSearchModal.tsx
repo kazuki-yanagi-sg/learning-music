@@ -370,8 +370,8 @@ export function SongSearchModal({
                   </div>
                   <div className="p-2 bg-purple-900/30 rounded border border-purple-800 flex items-center gap-2">
                     <span className="w-3 h-3 rounded-full bg-purple-500" />
-                    <span className="text-purple-300 text-sm">Vocals:</span>
-                    <span className="text-white text-sm">{analysisResult.tracks.vocals?.notes?.length || 0} ノート</span>
+                    <span className="text-purple-300 text-sm">Melody:</span>
+                    <span className="text-white text-sm">{analysisResult.tracks.melody?.notes?.length || 0} ノート</span>
                   </div>
                 </div>
               )}

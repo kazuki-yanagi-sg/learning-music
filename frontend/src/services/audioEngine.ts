@@ -7,16 +7,28 @@ import * as Tone from 'tone'
 import { Track, TrackType, Note } from '../types/music'
 
 // ドラムキットのマッピング（MIDIノート → 楽器）
-const DRUM_MAP: Record<number, 'kick' | 'snare' | 'hihat' | 'tom' | 'crash' | 'ride'> = {
-  36: 'kick',     // キック
-  38: 'snare',    // スネア
-  42: 'hihat',    // ハイハット(C)
-  46: 'hihat',    // ハイハット(O)
-  45: 'tom',      // ロータム
-  47: 'tom',      // ミドルタム
-  48: 'tom',      // ハイタム
-  49: 'crash',    // クラッシュ
-  51: 'ride',     // ライド
+const DRUM_MAP: Record<number, 'kick' | 'snare' | 'hihat' | 'hihatOpen' | 'tom' | 'crash' | 'ride'> = {
+  36: 'kick',       // キック
+  38: 'snare',      // スネア
+  42: 'hihat',      // ハイハット(クローズ)
+  46: 'hihatOpen',  // ハイハット(オープン)
+  45: 'tom',        // ロータム
+  47: 'tom',        // ミドルタム
+  48: 'tom',        // ハイタム
+  49: 'crash',      // クラッシュ
+  51: 'ride',       // ライド
+}
+
+// ドラムサンプルURL（無料のドラムキット）
+const DRUM_SAMPLES_BASE = 'https://tonejs.github.io/audio/drum-samples/breakbeat13/'
+const DRUM_SAMPLE_URLS: Record<string, string> = {
+  kick: DRUM_SAMPLES_BASE + 'kick.mp3',
+  snare: DRUM_SAMPLES_BASE + 'snare.mp3',
+  hihat: DRUM_SAMPLES_BASE + 'hihat.mp3',
+  hihatOpen: DRUM_SAMPLES_BASE + 'hihat-open.mp3',
+  tom: DRUM_SAMPLES_BASE + 'tom1.mp3',
+  crash: DRUM_SAMPLES_BASE + 'crash.mp3',
+  ride: DRUM_SAMPLES_BASE + 'ride.mp3',
 }
 
 class AudioEngine {
@@ -24,8 +36,12 @@ class AudioEngine {
   private bpm = 140
   private isPlaying = false
   private scheduledEvents: number[] = []
+  private drumSamplesLoaded = false
 
-  // 楽器
+  // ドラムサンプラー（リアルなドラム音）
+  private drumSampler: Tone.Sampler | null = null
+
+  // シンセ楽器（フォールバック用）
   private kick: Tone.MembraneSynth | null = null
   private snare: Tone.NoiseSynth | null = null
   private hihat: Tone.MetalSynth | null = null
@@ -56,6 +72,31 @@ class AudioEngine {
     // ドラムキット
     this.volumes.drum = new Tone.Volume(-6).toDestination()
 
+    // ドラムサンプラー（リアルな音）
+    // 各ドラム音をMIDIノートに対応付け
+    this.drumSampler = new Tone.Sampler(
+      {
+        C1: DRUM_SAMPLE_URLS.kick,     // キック (MIDI 36付近)
+        D1: DRUM_SAMPLE_URLS.snare,    // スネア (MIDI 38付近)
+        'F#1': DRUM_SAMPLE_URLS.hihat, // ハイハット (MIDI 42付近)
+        'A#1': DRUM_SAMPLE_URLS.hihatOpen, // オープンハイハット (MIDI 46付近)
+        A1: DRUM_SAMPLE_URLS.tom,      // タム (MIDI 45付近)
+        'C#2': DRUM_SAMPLE_URLS.crash, // クラッシュ (MIDI 49付近)
+        'D#2': DRUM_SAMPLE_URLS.ride,  // ライド (MIDI 51付近)
+      },
+      {
+        onload: () => {
+          console.log('Drum samples loaded')
+          this.drumSamplesLoaded = true
+        },
+        onerror: (err) => {
+          console.warn('Failed to load drum samples, using synth fallback:', err)
+          this.drumSamplesLoaded = false
+        },
+      }
+    ).connect(this.volumes.drum)
+
+    // シンセ楽器（サンプルロード失敗時のフォールバック）
     this.kick = new Tone.MembraneSynth({
       pitchDecay: 0.05,
       octaves: 4,
@@ -208,6 +249,16 @@ class AudioEngine {
    */
   private playDrumSound(pitch: number): void {
     const drumType = DRUM_MAP[pitch] || 'kick'
+
+    // サンプラーが読み込まれていればサンプル音を使用
+    if (this.drumSamplesLoaded && this.drumSampler) {
+      // ドラム種別をサンプラーのノートに変換
+      const sampleNote = this.drumTypeToSampleNote(drumType)
+      this.drumSampler.triggerAttackRelease(sampleNote, '8n')
+      return
+    }
+
+    // フォールバック: シンセ音
     switch (drumType) {
       case 'kick':
         this.kick?.triggerAttackRelease('C1', '8n')
@@ -218,6 +269,9 @@ class AudioEngine {
       case 'hihat':
         this.hihat?.triggerAttackRelease('C4', '32n')
         break
+      case 'hihatOpen':
+        this.hihat?.triggerAttackRelease('C4', '16n')
+        break
       case 'tom':
         this.tom?.triggerAttackRelease('G2', '8n')
         break
@@ -227,6 +281,22 @@ class AudioEngine {
       case 'ride':
         this.ride?.triggerAttackRelease('C4', '8n')
         break
+    }
+  }
+
+  /**
+   * ドラム種別をサンプラーのノートに変換
+   */
+  private drumTypeToSampleNote(drumType: string): string {
+    switch (drumType) {
+      case 'kick': return 'C1'
+      case 'snare': return 'D1'
+      case 'hihat': return 'F#1'
+      case 'hihatOpen': return 'A#1'
+      case 'tom': return 'A1'
+      case 'crash': return 'C#2'
+      case 'ride': return 'D#2'
+      default: return 'C1' // fallback to kick
     }
   }
 
@@ -287,10 +357,19 @@ class AudioEngine {
   }
 
   /**
-   * ドラムノートをトリガー
+   * ドラムノートをトリガー（スケジュール再生用）
    */
   private triggerDrumNote(pitch: number, time: number): void {
     const drumType = DRUM_MAP[pitch] || 'kick'
+
+    // サンプラーが読み込まれていればサンプル音を使用
+    if (this.drumSamplesLoaded && this.drumSampler) {
+      const sampleNote = this.drumTypeToSampleNote(drumType)
+      this.drumSampler.triggerAttackRelease(sampleNote, '8n', time)
+      return
+    }
+
+    // フォールバック: シンセ音
     switch (drumType) {
       case 'kick':
         this.kick?.triggerAttackRelease('C1', '8n', time)
@@ -300,6 +379,9 @@ class AudioEngine {
         break
       case 'hihat':
         this.hihat?.triggerAttackRelease('C4', '32n', time)
+        break
+      case 'hihatOpen':
+        this.hihat?.triggerAttackRelease('C4', '16n', time)
         break
       case 'tom':
         this.tom?.triggerAttackRelease('G2', '8n', time)
@@ -537,6 +619,11 @@ class AudioEngine {
   dispose(): void {
     this.stop()
 
+    // ドラムサンプラー
+    this.drumSampler?.dispose()
+    this.drumSamplesLoaded = false
+
+    // シンセ楽器
     this.kick?.dispose()
     this.snare?.dispose()
     this.hihat?.dispose()
