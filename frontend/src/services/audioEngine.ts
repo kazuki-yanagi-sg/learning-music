@@ -1,9 +1,12 @@
 /**
- * オーディオエンジン - Tone.js を使った音声再生
+ * オーディオエンジン - Tone.js + SoundFont を使った音声再生
  *
  * 4トラック（ドラム、ベース、キーボード、ギター）の再生を管理
+ * - ドラム: サンプル音源
+ * - ベース/キーボード/ギター: SoundFont (GM音源)
  */
 import * as Tone from 'tone'
+import Soundfont, { Player as SoundfontPlayer } from 'soundfont-player'
 import { Track, TrackType, Note } from '../types/music'
 
 // ドラムキットのマッピング（MIDIノート → 楽器）
@@ -37,9 +40,16 @@ class AudioEngine {
   private isPlaying = false
   private scheduledEvents: number[] = []
   private drumSamplesLoaded = false
+  private soundfontsLoaded = false
+  private audioContext: AudioContext | null = null
 
   // ドラムサンプラー（リアルなドラム音）
   private drumSampler: Tone.Sampler | null = null
+
+  // SoundFont楽器（GM音源）
+  private sfBass: SoundfontPlayer | null = null
+  private sfPiano: SoundfontPlayer | null = null
+  private sfGuitar: SoundfontPlayer | null = null
 
   // シンセ楽器（フォールバック用）
   private kick: Tone.MembraneSynth | null = null
@@ -173,7 +183,48 @@ class AudioEngine {
     }).connect(this.volumes.guitar)
 
     this.isInitialized = true
-    console.log('Audio engine initialized')
+    console.log('Audio engine initialized (synth fallback ready)')
+
+    // SoundFont楽器を非同期でロード（アニソン向けGM音源）
+    this.loadSoundfonts()
+  }
+
+  /**
+   * SoundFont楽器をロード
+   */
+  private async loadSoundfonts(): Promise<void> {
+    try {
+      // AudioContextを取得（Tone.jsのコンテキストを使用）
+      this.audioContext = Tone.getContext().rawContext as AudioContext
+
+      console.log('Loading SoundFont instruments...')
+
+      // 並列でロード
+      const [bass, piano, guitar] = await Promise.all([
+        Soundfont.instrument(this.audioContext, 'electric_bass_finger', {
+          soundfont: 'MusyngKite',
+          gain: 2.0, // ベースは少し大きめに
+        }),
+        Soundfont.instrument(this.audioContext, 'acoustic_grand_piano', {
+          soundfont: 'MusyngKite',
+          gain: 1.5,
+        }),
+        Soundfont.instrument(this.audioContext, 'electric_guitar_clean', {
+          soundfont: 'MusyngKite',
+          gain: 1.5,
+        }),
+      ])
+
+      this.sfBass = bass
+      this.sfPiano = piano
+      this.sfGuitar = guitar
+      this.soundfontsLoaded = true
+
+      console.log('SoundFont instruments loaded: bass, piano, guitar')
+    } catch (err) {
+      console.warn('Failed to load SoundFont instruments, using synth fallback:', err)
+      this.soundfontsLoaded = false
+    }
   }
 
   /**
@@ -233,13 +284,25 @@ class AudioEngine {
         this.playDrumSound(pitch)
         break
       case 'bass':
-        this.bass?.triggerAttackRelease(freq, duration)
+        if (this.soundfontsLoaded && this.sfBass) {
+          this.sfBass.play(pitch.toString(), undefined, { duration })
+        } else {
+          this.bass?.triggerAttackRelease(freq, duration)
+        }
         break
       case 'keyboard':
-        this.keyboard?.triggerAttackRelease(note, duration)
+        if (this.soundfontsLoaded && this.sfPiano) {
+          this.sfPiano.play(pitch.toString(), undefined, { duration })
+        } else {
+          this.keyboard?.triggerAttackRelease(note, duration)
+        }
         break
       case 'guitar':
-        this.guitar?.triggerAttackRelease(freq, duration)
+        if (this.soundfontsLoaded && this.sfGuitar) {
+          this.sfGuitar.play(pitch.toString(), undefined, { duration })
+        } else {
+          this.guitar?.triggerAttackRelease(freq, duration)
+        }
         break
     }
   }
@@ -345,13 +408,25 @@ class AudioEngine {
         this.triggerDrumNote(note.pitch, time)
         break
       case 'bass':
-        this.bass?.triggerAttackRelease(freq, duration, time)
+        if (this.soundfontsLoaded && this.sfBass) {
+          this.sfBass.play(note.pitch.toString(), time, { duration })
+        } else {
+          this.bass?.triggerAttackRelease(freq, duration, time)
+        }
         break
       case 'keyboard':
-        this.keyboard?.triggerAttackRelease(noteName, duration, time)
+        if (this.soundfontsLoaded && this.sfPiano) {
+          this.sfPiano.play(note.pitch.toString(), time, { duration })
+        } else {
+          this.keyboard?.triggerAttackRelease(noteName, duration, time)
+        }
         break
       case 'guitar':
-        this.guitar?.triggerAttackRelease(freq, duration, time)
+        if (this.soundfontsLoaded && this.sfGuitar) {
+          this.sfGuitar.play(note.pitch.toString(), time, { duration })
+        } else {
+          this.guitar?.triggerAttackRelease(freq, duration, time)
+        }
         break
     }
   }
@@ -465,11 +540,19 @@ class AudioEngine {
             this.triggerDrumNote(note.pitch, time)
             break
           case 'bass':
-            this.bass?.triggerAttackRelease(freq, duration, time)
+            if (this.soundfontsLoaded && this.sfBass) {
+              this.sfBass.play(note.pitch.toString(), time, { duration })
+            } else {
+              this.bass?.triggerAttackRelease(freq, duration, time)
+            }
             break
           case 'other':
           case 'default':
-            this.keyboard?.triggerAttackRelease(noteName, duration, time)
+            if (this.soundfontsLoaded && this.sfPiano) {
+              this.sfPiano.play(note.pitch.toString(), time, { duration })
+            } else {
+              this.keyboard?.triggerAttackRelease(noteName, duration, time)
+            }
             break
         }
       }, startTime)
@@ -556,12 +639,27 @@ class AudioEngine {
               this.triggerDrumNote(note.pitch, time)
               break
             case 'bass':
-              this.bass?.triggerAttackRelease(freq, duration, time)
+              if (this.soundfontsLoaded && this.sfBass) {
+                this.sfBass.play(note.pitch.toString(), time, { duration })
+              } else {
+                this.bass?.triggerAttackRelease(freq, duration, time)
+              }
               break
             case 'other':
+              // other（ギター/キーボード）はギター音源で再生
+              if (this.soundfontsLoaded && this.sfGuitar) {
+                this.sfGuitar.play(note.pitch.toString(), time, { duration })
+              } else {
+                this.keyboard?.triggerAttackRelease(noteName, duration, time)
+              }
+              break
             case 'melody':
-              // メロディはキーボード音源で再生
-              this.keyboard?.triggerAttackRelease(noteName, duration, time)
+              // メロディはピアノ音源で再生
+              if (this.soundfontsLoaded && this.sfPiano) {
+                this.sfPiano.play(note.pitch.toString(), time, { duration })
+              } else {
+                this.keyboard?.triggerAttackRelease(noteName, duration, time)
+              }
               break
           }
         }, startTime)
@@ -622,6 +720,15 @@ class AudioEngine {
     // ドラムサンプラー
     this.drumSampler?.dispose()
     this.drumSamplesLoaded = false
+
+    // SoundFont楽器
+    this.sfBass?.stop()
+    this.sfPiano?.stop()
+    this.sfGuitar?.stop()
+    this.sfBass = null
+    this.sfPiano = null
+    this.sfGuitar = null
+    this.soundfontsLoaded = false
 
     // シンセ楽器
     this.kick?.dispose()
