@@ -1,11 +1,14 @@
 /**
  * 解析結果ピアノロールモーダル
  *
- * 4トラック表示: 各トラックを独立したピアノロールで表示
+ * 4トラック表示:
+ * - ドラム: 専用のグリッド形式（DAW風）
+ * - ベース/その他: ピアノロール形式
  */
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
 import { AnalysisResult, FourTrackResult, NoteInfo } from '../../services/songAnalysisApi'
 import { audioEngine } from '../../services/audioEngine'
+import { AnalysisDrumGrid } from './AnalysisDrumGrid'
 
 interface AnalysisPianoRollModalProps {
   isOpen: boolean
@@ -38,11 +41,11 @@ const TRACK_CONFIG = {
     bgColor: '#1e3a8a',
     defaultPitchRange: { min: 48, max: 84 }, // コード楽器用
   },
-  vocals: {
-    label: 'Vocals',
-    color: '#a855f7',
-    bgColor: '#581c87',
-    defaultPitchRange: { min: 48, max: 84 },
+  melody: {
+    label: 'Melody',
+    color: '#f59e0b',  // オレンジ系（ボーカルメロディを強調）
+    bgColor: '#78350f',
+    defaultPitchRange: { min: 48, max: 84 }, // ボーカル音域
   },
 } as const
 
@@ -275,7 +278,7 @@ export function AnalysisPianoRollModal({
         drums: result.tracks.drums?.notes || [],
         bass: result.tracks.bass?.notes || [],
         other: result.tracks.other?.notes || [],
-        vocals: result.tracks.vocals?.notes || [],
+        melody: result.tracks.melody?.notes || [],  // ボーカルメロディ
       }
     }
     return { default: result.notes || [] }
@@ -326,6 +329,7 @@ export function AnalysisPianoRollModal({
             drums: mutedTracks.has('drums') ? [] : result.tracks.drums?.notes,
             bass: mutedTracks.has('bass') ? [] : result.tracks.bass?.notes,
             other: mutedTracks.has('other') ? [] : result.tracks.other?.notes,
+            melody: mutedTracks.has('melody') ? [] : result.tracks.melody?.notes,
           },
           mutedTracks,
           onProgress
@@ -444,23 +448,47 @@ export function AnalysisPianoRollModal({
         <div className="flex-1 overflow-y-auto">
           {is4Track ? (
             // 4トラック表示
-            (['drums', 'bass', 'other', 'vocals'] as TrackType[]).map(trackType => {
-              const notes = tracksData[trackType] || []
-              if (notes.length === 0 && trackType === 'vocals') return null // ボーカルは空なら非表示
-              return (
-                <TrackPianoRoll
-                  key={trackType}
-                  trackType={trackType}
-                  notes={notes}
-                  maxTime={maxTime}
-                  zoom={zoom}
-                  playbackTime={playbackTime}
-                  isPlaying={isPlaying}
-                  isMuted={mutedTracks.has(trackType)}
-                  onToggleMute={() => toggleMute(trackType)}
-                />
-              )
-            })
+            <>
+              {/* メロディ（ボーカル）は一番上に表示 */}
+              <TrackPianoRoll
+                trackType="melody"
+                notes={tracksData.melody || []}
+                maxTime={maxTime}
+                zoom={zoom}
+                playbackTime={playbackTime}
+                isPlaying={isPlaying}
+                isMuted={mutedTracks.has('melody')}
+                onToggleMute={() => toggleMute('melody')}
+              />
+              {/* ドラムは専用グリッド */}
+              <AnalysisDrumGrid
+                notes={tracksData.drums || []}
+                maxTime={maxTime}
+                zoom={zoom}
+                playbackTime={playbackTime}
+                isPlaying={isPlaying}
+                isMuted={mutedTracks.has('drums')}
+                onToggleMute={() => toggleMute('drums')}
+                tempo={result.tempo || 120}
+              />
+              {/* ベース・その他はピアノロール */}
+              {(['bass', 'other'] as TrackType[]).map(trackType => {
+                const notes = tracksData[trackType] || []
+                return (
+                  <TrackPianoRoll
+                    key={trackType}
+                    trackType={trackType}
+                    notes={notes}
+                    maxTime={maxTime}
+                    zoom={zoom}
+                    playbackTime={playbackTime}
+                    isPlaying={isPlaying}
+                    isMuted={mutedTracks.has(trackType)}
+                    onToggleMute={() => toggleMute(trackType)}
+                  />
+                )
+              })}
+            </>
           ) : (
             // 単一トラック表示
             <TrackPianoRoll

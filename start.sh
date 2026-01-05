@@ -105,6 +105,11 @@ setup_venv() {
 
         # 残りの依存関係
         pip install -r backend/requirements.txt
+
+        # TensorFlowをアンインストール（Basic PitchがCoreMを使うように）
+        # TensorFlow 2.16+はBasic Pitchのモデルと互換性がないため
+        echo_info "TensorFlowを削除中（CoreMLを優先）..."
+        pip uninstall tensorflow tensorflow-intel tensorflow-io-gcs-filesystem keras -y 2>/dev/null || true
     fi
 }
 

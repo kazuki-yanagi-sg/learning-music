@@ -432,13 +432,14 @@ class AudioEngine {
   }
 
   /**
-   * 4トラックの解析結果を再生
+   * 4トラックの解析結果を再生（melody追加）
    */
   play4TrackAnalysis(
     tracks: {
       drums?: Array<{ pitch: number; start: number; end: number }>;
       bass?: Array<{ pitch: number; start: number; end: number }>;
       other?: Array<{ pitch: number; start: number; end: number }>;
+      melody?: Array<{ pitch: number; start: number; end: number }>;
     },
     mutedTracks: Set<string> = new Set(),
     onProgress?: (time: number) => void
@@ -456,7 +457,7 @@ class AudioEngine {
     // 各トラックのノートをスケジュール
     const scheduleTrack = (
       notes: Array<{ pitch: number; start: number; end: number }> | undefined,
-      trackType: 'drums' | 'bass' | 'other'
+      trackType: 'drums' | 'bass' | 'other' | 'melody'
     ) => {
       if (!notes || mutedTracks.has(trackType)) return
 
@@ -476,6 +477,8 @@ class AudioEngine {
               this.bass?.triggerAttackRelease(freq, duration, time)
               break
             case 'other':
+            case 'melody':
+              // メロディはキーボード音源で再生
               this.keyboard?.triggerAttackRelease(noteName, duration, time)
               break
           }
@@ -488,6 +491,7 @@ class AudioEngine {
     scheduleTrack(tracks.drums, 'drums')
     scheduleTrack(tracks.bass, 'bass')
     scheduleTrack(tracks.other, 'other')
+    scheduleTrack(tracks.melody, 'melody')
 
     // 進捗コールバック
     let progressInterval: number | null = null
@@ -504,6 +508,7 @@ class AudioEngine {
       ...(tracks.drums || []),
       ...(tracks.bass || []),
       ...(tracks.other || []),
+      ...(tracks.melody || []),
     ]
     const maxTime = allNotes.length > 0 ? Math.max(...allNotes.map((n) => n.end)) + 1 : 0
 

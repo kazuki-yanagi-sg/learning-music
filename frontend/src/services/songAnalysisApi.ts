@@ -59,7 +59,7 @@ export interface FourTrackResult {
     drums: TrackNotes
     bass: TrackNotes
     other: TrackNotes
-    vocals: TrackNotes
+    melody: TrackNotes  // ボーカルメロディ → ピアノで表示
   }
   chords: ChordInfo[]
   analysis_text: string | null
