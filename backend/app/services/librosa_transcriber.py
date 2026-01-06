@@ -16,19 +16,25 @@ class LibrosaTranscriber:
     """Librosaによる音声→ノート変換"""
 
     def __init__(self):
-        # ボーカル用パラメータ
+        # ボーカル用パラメータ（感度UP調整済み）
         self.vocal_fmin = 80    # Hz (E2あたり)
         self.vocal_fmax = 2000  # Hz (B6あたり) - 女性ボーカル対応
-        self.min_note_duration = 0.02  # 秒（短いノートも拾う）
-        self.voiced_threshold = 0.05  # 有声判定しきい値（さらに緩和）
+        self.min_note_duration = 0.01  # 0.02→0.01秒 短いノートも拾う
+        self.voiced_threshold = 0.02   # 0.05→0.02 弱いメロディも拾う
         self.pitch_tolerance = 1  # 半音（ビブラート許容）
-        self.gap_tolerance = 0.05  # 秒（この時間以内のギャップは無視）
+        self.gap_tolerance = 0.08  # 0.05→0.08秒 ぶつ切り軽減
 
-        # ドラム用パラメータ
+        # ドラム用パラメータ（GM Drum Map準拠）
         self.drum_map = {
-            "kick": 36,     # Bass Drum
-            "snare": 38,    # Acoustic Snare
-            "hihat": 42,    # Closed Hi-Hat
+            "kick": 36,         # Bass Drum 1
+            "snare": 38,        # Acoustic Snare
+            "hihat_closed": 42, # Closed Hi-Hat
+            "hihat_open": 46,   # Open Hi-Hat
+            "tom_high": 48,     # Hi-Mid Tom
+            "tom_mid": 45,      # Low Tom
+            "tom_low": 41,      # Low Floor Tom
+            "crash": 49,        # Crash Cymbal 1
+            "ride": 51,         # Ride Cymbal 1
         }
 
     def extract_melody(self, audio_path: str, tempo: float = None) -> dict:
@@ -258,7 +264,14 @@ class LibrosaTranscriber:
 
     def extract_drums(self, audio_path: str, tempo: float = None) -> dict:
         """
-        オンセット検出でドラムイベントを抽出
+        周波数帯域分離によるドラムイベント抽出
+
+        各ドラムの周波数特性:
+        - Kick: 20-100Hz（低域のドスン）
+        - Toms: 80-400Hz（中低域のドン）
+        - Snare: 150-500Hz + 2000-5000Hz（胴鳴り＋スナッピー）
+        - Hi-hat: 5000-15000Hz（金属的なチッ）
+        - Crash/Ride: 3000-10000Hz（シンバルのシャーン）
 
         Args:
             audio_path: 音声ファイルのパス（分離済みドラム）
@@ -281,9 +294,9 @@ class LibrosaTranscriber:
 
         try:
             print(f"[Librosa] Loading drum audio: {audio_file}")
-            # 音声を読み込み
-            y, sr = librosa.load(str(audio_file), sr=22050, mono=True)
-            print(f"[Librosa] Drum audio loaded: {len(y)} samples, duration={len(y)/sr:.1f}s")
+            # 44100Hzで読み込み（高周波数を正確に捉えるため）
+            y, sr = librosa.load(str(audio_file), sr=44100, mono=True)
+            print(f"[Librosa] Drum audio loaded: {len(y)} samples, sr={sr}, duration={len(y)/sr:.1f}s")
 
             if len(y) == 0:
                 return {
@@ -292,63 +305,100 @@ class LibrosaTranscriber:
                     "error": "Audio file is empty",
                 }
 
-            # 周波数帯域ごとに分離してオンセット検出
             notes = []
-            print(f"[Librosa] Running onset detection for drums...")
+            detected_times = {}  # 重複検出防止用
 
-            # キック（低域: ~150Hz）
-            y_low = librosa.effects.harmonic(y)
-            y_kick = signal.lfilter([1], [1, -0.97], y_low)
-            kick_onsets = self._detect_onsets(y_kick, sr, tempo)
+            # 1. キック検出（20-100Hz）
+            print(f"[Librosa] Detecting kick...")
+            y_kick = self._bandpass_filter(y, sr, 20, 100)
+            kick_onsets = self._detect_band_onsets(y_kick, sr, tempo, delta=0.08)
             print(f"[Librosa] Kick onsets: {len(kick_onsets)}")
-            for onset_time in kick_onsets:
-                notes.append({
-                    "pitch": self.drum_map["kick"],
-                    "start": round(onset_time, 3),
-                    "end": round(onset_time + 0.05, 3),
-                    "velocity": 100,
-                })
+            for t in kick_onsets:
+                notes.append(self._create_drum_note("kick", t))
+                detected_times[round(t, 2)] = "kick"
 
-            # スネア/ハイハット（高域）
-            y_perc = librosa.effects.percussive(y)
-            perc_onsets = self._detect_onsets(y_perc, sr, tempo)
-            print(f"[Librosa] Percussion onsets: {len(perc_onsets)}")
-
-            # スペクトル重心で分類
-            for onset_time in perc_onsets:
-                # 既にキックとして検出されていたらスキップ
-                if any(abs(n["start"] - onset_time) < 0.03 for n in notes if n["pitch"] == self.drum_map["kick"]):
+            # 2. スネア検出（150-500Hz + 高周波成分で判定）
+            print(f"[Librosa] Detecting snare...")
+            y_snare_low = self._bandpass_filter(y, sr, 150, 500)
+            y_snare_high = self._bandpass_filter(y, sr, 2000, 5000)
+            snare_onsets = self._detect_band_onsets(y_snare_low, sr, tempo, delta=0.06)
+            for t in snare_onsets:
+                # キックと重複していたらスキップ
+                if self._is_duplicate(t, detected_times, threshold=0.03):
                     continue
+                # スナッピー成分（高周波）があればスネアと判定
+                if self._has_energy_at_time(y_snare_high, sr, t, threshold=0.1):
+                    notes.append(self._create_drum_note("snare", t, velocity=95))
+                    detected_times[round(t, 2)] = "snare"
+            print(f"[Librosa] Snare detected: {sum(1 for n in notes if n['pitch'] == self.drum_map['snare'])}")
 
-                # 簡易的にスネアとハイハットを交互に（本当は周波数分析が必要）
-                frame_idx = int(onset_time * sr / 512)
-                if frame_idx < len(y) // 512:
-                    # スペクトル重心で判定
-                    start_sample = int(onset_time * sr)
-                    end_sample = min(start_sample + 2048, len(y))
-                    segment = y[start_sample:end_sample]
-                    if len(segment) > 0:
-                        centroid = librosa.feature.spectral_centroid(y=segment, sr=sr)
-                        if centroid.mean() > 3000:
-                            drum_type = "hihat"
-                        else:
-                            drum_type = "snare"
-                    else:
-                        drum_type = "snare"
+            # 3. タム検出（80-400Hz、キック/スネア以外）
+            print(f"[Librosa] Detecting toms...")
+            y_tom = self._bandpass_filter(y, sr, 80, 400)
+            tom_onsets = self._detect_band_onsets(y_tom, sr, tempo, delta=0.07)
+            for t in tom_onsets:
+                if self._is_duplicate(t, detected_times, threshold=0.03):
+                    continue
+                # 周波数重心でタムの種類を判定
+                centroid = self._get_spectral_centroid_at_time(y, sr, t)
+                if centroid < 150:
+                    tom_type = "tom_low"
+                elif centroid < 250:
+                    tom_type = "tom_mid"
                 else:
-                    drum_type = "snare"
+                    tom_type = "tom_high"
+                notes.append(self._create_drum_note(tom_type, t, velocity=90))
+                detected_times[round(t, 2)] = tom_type
+            print(f"[Librosa] Toms detected: {sum(1 for n in notes if 'tom' in str(n.get('pitch', '')))}")
 
-                notes.append({
-                    "pitch": self.drum_map[drum_type],
-                    "start": round(onset_time, 3),
-                    "end": round(onset_time + 0.05, 3),
-                    "velocity": 90,
-                })
+            # 4. ハイハット検出（5000-15000Hz）
+            print(f"[Librosa] Detecting hi-hat...")
+            y_hihat = self._bandpass_filter(y, sr, 5000, 15000)
+            hihat_onsets = self._detect_band_onsets(y_hihat, sr, tempo, delta=0.04)
+            for t in hihat_onsets:
+                if self._is_duplicate(t, detected_times, threshold=0.02):
+                    continue
+                # 持続時間でオープン/クローズドを判定
+                decay = self._get_decay_time(y_hihat, sr, t)
+                if decay > 0.1:
+                    hihat_type = "hihat_open"
+                else:
+                    hihat_type = "hihat_closed"
+                notes.append(self._create_drum_note(hihat_type, t, velocity=80))
+                detected_times[round(t, 2)] = hihat_type
+            print(f"[Librosa] Hi-hat detected: {sum(1 for n in notes if 'hihat' in str(n.get('pitch', '')))}")
+
+            # 5. クラッシュ/ライドシンバル検出（3000-10000Hz）
+            print(f"[Librosa] Detecting cymbals...")
+            y_cymbal = self._bandpass_filter(y, sr, 3000, 10000)
+            cymbal_onsets = self._detect_band_onsets(y_cymbal, sr, tempo, delta=0.1)
+            for t in cymbal_onsets:
+                if self._is_duplicate(t, detected_times, threshold=0.05):
+                    continue
+                # 音量でクラッシュ/ライドを判定（クラッシュはアタックが強い）
+                attack = self._get_attack_strength(y_cymbal, sr, t)
+                if attack > 0.3:
+                    cymbal_type = "crash"
+                    vel = 100
+                else:
+                    cymbal_type = "ride"
+                    vel = 85
+                notes.append(self._create_drum_note(cymbal_type, t, velocity=vel))
+                detected_times[round(t, 2)] = cymbal_type
+            print(f"[Librosa] Cymbals detected: {sum(1 for n in notes if n['pitch'] in [self.drum_map['crash'], self.drum_map['ride']])}")
 
             # 時間順にソート
             notes.sort(key=lambda n: n["start"])
 
-            print(f"[Librosa] Detected {len(notes)} drum events")
+            # 統計を出力
+            drum_counts = {}
+            for note in notes:
+                pitch = note["pitch"]
+                drum_name = [k for k, v in self.drum_map.items() if v == pitch]
+                drum_name = drum_name[0] if drum_name else str(pitch)
+                drum_counts[drum_name] = drum_counts.get(drum_name, 0) + 1
+            print(f"[Librosa] Drum summary: {drum_counts}")
+            print(f"[Librosa] Total drum events: {len(notes)}")
 
             return {
                 "success": True,
@@ -357,21 +407,128 @@ class LibrosaTranscriber:
             }
 
         except Exception as e:
+            import traceback
             print(f"[Librosa] Drums error: {type(e).__name__}: {str(e)}")
+            traceback.print_exc()
             return {
                 "success": False,
                 "notes": [],
                 "error": f"Drum detection failed: {str(e)}",
             }
 
+    def _bandpass_filter(self, y: np.ndarray, sr: int, low: float, high: float) -> np.ndarray:
+        """バンドパスフィルタを適用"""
+        nyquist = sr / 2
+        low_norm = max(low / nyquist, 0.001)
+        high_norm = min(high / nyquist, 0.999)
+        if low_norm >= high_norm:
+            return y
+        b, a = signal.butter(4, [low_norm, high_norm], btype='band')
+        return signal.filtfilt(b, a, y)
+
+    def _detect_band_onsets(self, y: np.ndarray, sr: int, tempo: float = None, delta: float = 0.05) -> np.ndarray:
+        """帯域別オンセット検出"""
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=512)
+        onset_frames = librosa.onset.onset_detect(
+            onset_envelope=onset_env,
+            sr=sr,
+            hop_length=512,
+            backtrack=True,
+            units='frames',
+            delta=delta,
+        )
+        onset_times = librosa.frames_to_time(onset_frames, sr=sr, hop_length=512)
+
+        # クオンタイズ
+        if tempo and tempo > 0:
+            beat_duration = 60.0 / tempo
+            grid = beat_duration * 0.25  # 16分音符
+            onset_times = np.round(onset_times / grid) * grid
+
+        return onset_times
+
+    def _create_drum_note(self, drum_type: str, time: float, velocity: int = 100) -> dict:
+        """ドラムノートを生成"""
+        return {
+            "pitch": self.drum_map[drum_type],
+            "start": round(time, 3),
+            "end": round(time + 0.05, 3),
+            "velocity": velocity,
+        }
+
+    def _is_duplicate(self, time: float, detected: dict, threshold: float = 0.03) -> bool:
+        """既に検出済みかチェック"""
+        for t in detected.keys():
+            if abs(t - round(time, 2)) < threshold:
+                return True
+        return False
+
+    def _has_energy_at_time(self, y: np.ndarray, sr: int, time: float, threshold: float = 0.1) -> bool:
+        """指定時刻にエネルギーがあるかチェック"""
+        start_sample = int(time * sr)
+        end_sample = min(start_sample + int(sr * 0.05), len(y))
+        if start_sample >= len(y):
+            return False
+        segment = y[start_sample:end_sample]
+        rms = np.sqrt(np.mean(segment ** 2))
+        return rms > threshold * np.max(np.abs(y))
+
+    def _get_spectral_centroid_at_time(self, y: np.ndarray, sr: int, time: float) -> float:
+        """指定時刻のスペクトル重心を取得"""
+        start_sample = int(time * sr)
+        end_sample = min(start_sample + 2048, len(y))
+        if start_sample >= len(y):
+            return 200.0
+        segment = y[start_sample:end_sample]
+        if len(segment) < 512:
+            return 200.0
+        centroid = librosa.feature.spectral_centroid(y=segment, sr=sr)
+        return float(centroid.mean())
+
+    def _get_decay_time(self, y: np.ndarray, sr: int, time: float) -> float:
+        """減衰時間を推定（オープン/クローズドハイハット判定用）"""
+        start_sample = int(time * sr)
+        window_size = int(sr * 0.2)  # 200ms window
+        end_sample = min(start_sample + window_size, len(y))
+        if start_sample >= len(y):
+            return 0.0
+        segment = y[start_sample:end_sample]
+        if len(segment) < 100:
+            return 0.0
+        # RMSエンベロープを計算
+        frame_length = 512
+        hop_length = 128
+        rms = librosa.feature.rms(y=segment, frame_length=frame_length, hop_length=hop_length)[0]
+        if len(rms) < 2:
+            return 0.0
+        # ピークから-6dBになるまでの時間
+        peak_idx = np.argmax(rms)
+        peak_val = rms[peak_idx]
+        threshold = peak_val * 0.5  # -6dB
+        for i in range(peak_idx, len(rms)):
+            if rms[i] < threshold:
+                return (i - peak_idx) * hop_length / sr
+        return 0.15  # 減衰しない場合はオープンと判定
+
+    def _get_attack_strength(self, y: np.ndarray, sr: int, time: float) -> float:
+        """アタックの強さを取得（クラッシュ/ライド判定用）"""
+        start_sample = int(time * sr)
+        window_size = int(sr * 0.05)  # 50ms
+        end_sample = min(start_sample + window_size, len(y))
+        if start_sample >= len(y):
+            return 0.0
+        segment = y[start_sample:end_sample]
+        return float(np.max(np.abs(segment)))
+
     def _detect_onsets(self, y: np.ndarray, sr: int, tempo: float = None) -> np.ndarray:
-        """オンセット検出"""
+        """オンセット検出（感度UP調整済み）"""
         onset_frames = librosa.onset.onset_detect(
             y=y,
             sr=sr,
             hop_length=512,
             backtrack=True,
             units='frames',
+            delta=0.05,  # デフォルト0.07→0.05 感度UP
         )
         onset_times = librosa.frames_to_time(onset_frames, sr=sr, hop_length=512)
 

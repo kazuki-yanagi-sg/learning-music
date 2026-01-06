@@ -111,6 +111,12 @@ setup_venv() {
         echo_info "TensorFlowを削除中（CoreMLを優先）..."
         pip uninstall tensorflow tensorflow-intel tensorflow-io-gcs-filesystem keras -y 2>/dev/null || true
     fi
+
+    # autochord の個別チェック（後から追加された依存関係）
+    if ! pip show autochord &> /dev/null; then
+        echo_info "autochord をインストール中（和音認識用）..."
+        pip install autochord || echo_warn "autochord インストール失敗（和音認識なしで動作）"
+    fi
 }
 
 # Dockerサービス起動

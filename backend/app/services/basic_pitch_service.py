@@ -35,12 +35,12 @@ class BasicPitchService:
         """初期化（モデルはpredict時に自動ロード）"""
         self.model_path = ICASSP_2022_MODEL_PATH
         print(f"[BasicPitch] Using model: {self.model_path}")
-        # 信頼度しきい値（これ以下のノートは除外）- 低めに設定
-        self.confidence_threshold = 0.3
-        # クオンタイズ解像度（8分音符 = 0.5拍）- 粗めに設定
-        self.quantize_resolution = 0.5
+        # 信頼度しきい値（これ以下のノートは除外）
+        self.confidence_threshold = 0.25  # 0.3→0.25 ノートを拾いやすく
+        # クオンタイズ解像度（16分音符 = 0.25拍）
+        self.quantize_resolution = 0.25  # 0.5→0.25 精度UP
         # ノートマージ用の最大ギャップ（秒）
-        self.merge_gap_threshold = 0.1
+        self.merge_gap_threshold = 0.15  # 0.1→0.15 ぶつ切り軽減
 
     def detect_tempo(self, audio_path: str) -> tuple[float, np.ndarray]:
         """
@@ -369,7 +369,7 @@ class BasicPitchService:
             }
 
     def _get_track_params(self, track_type: str) -> dict:
-        """楽器別のパラメータを取得"""
+        """楽器別のパラメータを取得（感度UP調整済み）"""
         params = {
             "drums": {
                 # ドラムはBasic Pitchに不向き - スキップフラグ
@@ -382,27 +382,26 @@ class BasicPitchService:
                 "max_freq": None,
             },
             "bass": {
-                "onset_threshold": 0.5,
-                "frame_threshold": 0.4,
-                "min_note_length": 100,  # ms
-                "confidence_threshold": 0.5,
+                "onset_threshold": 0.3,       # 0.5→0.3 感度UP
+                "frame_threshold": 0.25,      # 0.4→0.25 持続音検出強化
+                "min_note_length": 50,        # 100→50ms 細かいノートも拾う
+                "confidence_threshold": 0.3,  # 0.5→0.3 低い音を拾いやすく
                 "min_freq": 30,   # E1あたり
                 "max_freq": 300,  # D4あたり（ベース音域を絞る）
             },
             "other": {
-                "onset_threshold": 0.5,
-                "frame_threshold": 0.4,
-                "min_note_length": 80,  # ms
-                "confidence_threshold": 0.5,
+                "onset_threshold": 0.3,       # 0.5→0.3 感度UP
+                "frame_threshold": 0.25,      # 0.4→0.25 持続音検出強化
+                "min_note_length": 50,        # 80→50ms 細かいノートも拾う
+                "confidence_threshold": 0.35, # 0.5→0.35 和音の弱い音を拾う
                 "min_freq": 80,   # E2あたり
                 "max_freq": 2000, # B6あたり
             },
             "vocals": {
-                # ボーカルメロディ - Basic Pitchは苦手だが試行
-                "onset_threshold": 0.4,
-                "frame_threshold": 0.3,
-                "min_note_length": 100,  # ms - メロディは長め
-                "confidence_threshold": 0.4,
+                "onset_threshold": 0.3,       # 0.4→0.3 感度UP
+                "frame_threshold": 0.2,       # 0.3→0.2 持続音検出強化
+                "min_note_length": 50,        # 100→50ms 細かいノートも拾う
+                "confidence_threshold": 0.25, # 0.4→0.25 弱いメロディも拾う
                 "min_freq": 150,  # D3あたり（ボーカル下限）
                 "max_freq": 1000, # B5あたり（ボーカル上限）
             },

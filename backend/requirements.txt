@@ -21,6 +21,9 @@ basic-pitch[coreml]>=0.3.0
 # Audio Analysis (Tempo Detection)
 librosa>=0.10.0
 
+# Chord Recognition
+autochord>=0.1.0
+
 # Audio Source Separation
 # NOTE: demucs, torch, torchaudio は start.sh で個別インストール
 # (lameenc の依存関係問題を回避するため)
