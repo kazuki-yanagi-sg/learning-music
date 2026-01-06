@@ -308,84 +308,76 @@ class LibrosaTranscriber:
             notes = []
             detected_times = {}  # 重複検出防止用
 
-            # 1. キック検出（20-100Hz）
-            print(f"[Librosa] Detecting kick...")
-            y_kick = self._bandpass_filter(y, sr, 20, 100)
-            kick_onsets = self._detect_band_onsets(y_kick, sr, tempo, delta=0.08)
-            print(f"[Librosa] Kick onsets: {len(kick_onsets)}")
-            for t in kick_onsets:
-                notes.append(self._create_drum_note("kick", t))
-                detected_times[round(t, 2)] = "kick"
+            # 各帯域のエネルギーを事前計算
+            y_low = self._bandpass_filter(y, sr, 20, 120)      # キック帯域
+            y_mid = self._bandpass_filter(y, sr, 150, 500)     # スネア胴帯域
+            y_high = self._bandpass_filter(y, sr, 2000, 6000)  # スナッピー帯域
+            y_hihat = self._bandpass_filter(y, sr, 6000, 15000) # ハイハット帯域
 
-            # 2. スネア検出（150-500Hz + 高周波成分で判定）
-            print(f"[Librosa] Detecting snare...")
-            y_snare_low = self._bandpass_filter(y, sr, 150, 500)
-            y_snare_high = self._bandpass_filter(y, sr, 2000, 5000)
-            snare_onsets = self._detect_band_onsets(y_snare_low, sr, tempo, delta=0.06)
-            for t in snare_onsets:
-                # キックと重複していたらスキップ
-                if self._is_duplicate(t, detected_times, threshold=0.03):
-                    continue
-                # スナッピー成分（高周波）があればスネアと判定
-                if self._has_energy_at_time(y_snare_high, sr, t, threshold=0.1):
-                    notes.append(self._create_drum_note("snare", t, velocity=95))
-                    detected_times[round(t, 2)] = "snare"
-            print(f"[Librosa] Snare detected: {sum(1 for n in notes if n['pitch'] == self.drum_map['snare'])}")
+            # 全帯域からオンセットを検出
+            print(f"[Librosa] Detecting all onsets...")
+            y_perc = librosa.effects.percussive(y)
+            all_onsets = self._detect_band_onsets(y_perc, sr, tempo, delta=0.03)
+            print(f"[Librosa] Total onsets: {len(all_onsets)}")
 
-            # 3. タム検出（80-400Hz、キック/スネア以外）
-            print(f"[Librosa] Detecting toms...")
-            y_tom = self._bandpass_filter(y, sr, 80, 400)
-            tom_onsets = self._detect_band_onsets(y_tom, sr, tempo, delta=0.07)
-            for t in tom_onsets:
-                if self._is_duplicate(t, detected_times, threshold=0.03):
-                    continue
-                # 周波数重心でタムの種類を判定
-                centroid = self._get_spectral_centroid_at_time(y, sr, t)
-                if centroid < 150:
-                    tom_type = "tom_low"
-                elif centroid < 250:
-                    tom_type = "tom_mid"
-                else:
-                    tom_type = "tom_high"
-                notes.append(self._create_drum_note(tom_type, t, velocity=90))
-                detected_times[round(t, 2)] = tom_type
-            print(f"[Librosa] Toms detected: {sum(1 for n in notes if 'tom' in str(n.get('pitch', '')))}")
-
-            # 4. ハイハット検出（5000-15000Hz）
-            print(f"[Librosa] Detecting hi-hat...")
-            y_hihat = self._bandpass_filter(y, sr, 5000, 15000)
-            hihat_onsets = self._detect_band_onsets(y_hihat, sr, tempo, delta=0.04)
-            for t in hihat_onsets:
+            # 各オンセットを分類
+            for t in all_onsets:
                 if self._is_duplicate(t, detected_times, threshold=0.02):
                     continue
-                # 持続時間でオープン/クローズドを判定
-                decay = self._get_decay_time(y_hihat, sr, t)
-                if decay > 0.1:
-                    hihat_type = "hihat_open"
-                else:
-                    hihat_type = "hihat_closed"
-                notes.append(self._create_drum_note(hihat_type, t, velocity=80))
-                detected_times[round(t, 2)] = hihat_type
-            print(f"[Librosa] Hi-hat detected: {sum(1 for n in notes if 'hihat' in str(n.get('pitch', '')))}")
 
-            # 5. クラッシュ/ライドシンバル検出（3000-10000Hz）
-            print(f"[Librosa] Detecting cymbals...")
-            y_cymbal = self._bandpass_filter(y, sr, 3000, 10000)
-            cymbal_onsets = self._detect_band_onsets(y_cymbal, sr, tempo, delta=0.1)
-            for t in cymbal_onsets:
-                if self._is_duplicate(t, detected_times, threshold=0.05):
-                    continue
-                # 音量でクラッシュ/ライドを判定（クラッシュはアタックが強い）
-                attack = self._get_attack_strength(y_cymbal, sr, t)
-                if attack > 0.3:
-                    cymbal_type = "crash"
+                # 各帯域のエネルギーを計算
+                e_low = self._get_energy_at_time(y_low, sr, t)
+                e_mid = self._get_energy_at_time(y_mid, sr, t)
+                e_high = self._get_energy_at_time(y_high, sr, t)
+                e_hihat = self._get_energy_at_time(y_hihat, sr, t)
+
+                # エネルギー比で分類
+                total = e_low + e_mid + e_high + e_hihat + 1e-10
+                r_low = e_low / total
+                r_mid = e_mid / total
+                r_high = e_high / total
+                r_hihat = e_hihat / total
+
+                # 判定ロジック
+                if r_hihat > 0.4:
+                    # ハイハット優勢
+                    decay = self._get_decay_time(y_hihat, sr, t)
+                    if decay > 0.08:
+                        drum_type = "hihat_open"
+                    else:
+                        drum_type = "hihat_closed"
+                    vel = 80
+                elif r_low > 0.5 and r_mid < 0.25:
+                    # 低域が圧倒的 → キック
+                    drum_type = "kick"
                     vel = 100
+                elif r_mid > 0.3 and r_high > 0.15:
+                    # 中域 + 高域（スナッピー）→ スネア
+                    drum_type = "snare"
+                    vel = 95
+                elif r_mid > 0.4:
+                    # 中域のみ → タム
+                    centroid = self._get_spectral_centroid_at_time(y, sr, t)
+                    if centroid < 200:
+                        drum_type = "tom_low"
+                    elif centroid < 350:
+                        drum_type = "tom_mid"
+                    else:
+                        drum_type = "tom_high"
+                    vel = 90
+                elif r_low > 0.35:
+                    # 低域優勢だがそこまで強くない → キック
+                    drum_type = "kick"
+                    vel = 95
                 else:
-                    cymbal_type = "ride"
-                    vel = 85
-                notes.append(self._create_drum_note(cymbal_type, t, velocity=vel))
-                detected_times[round(t, 2)] = cymbal_type
-            print(f"[Librosa] Cymbals detected: {sum(1 for n in notes if n['pitch'] in [self.drum_map['crash'], self.drum_map['ride']])}")
+                    # デフォルト: ハイハット（最も頻度が高い）
+                    drum_type = "hihat_closed"
+                    vel = 75
+
+                notes.append(self._create_drum_note(drum_type, t, velocity=vel))
+                detected_times[round(t, 2)] = drum_type
+
+            print(f"[Librosa] After classification: {len(notes)} notes")
 
             # 時間順にソート
             notes.sort(key=lambda n: n["start"])
@@ -473,6 +465,17 @@ class LibrosaTranscriber:
         segment = y[start_sample:end_sample]
         rms = np.sqrt(np.mean(segment ** 2))
         return rms > threshold * np.max(np.abs(y))
+
+    def _get_energy_at_time(self, y: np.ndarray, sr: int, time: float) -> float:
+        """指定時刻のRMSエネルギーを取得"""
+        start_sample = int(time * sr)
+        end_sample = min(start_sample + int(sr * 0.03), len(y))  # 30ms窓
+        if start_sample >= len(y):
+            return 0.0
+        segment = y[start_sample:end_sample]
+        if len(segment) == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(segment ** 2)))
 
     def _get_spectral_centroid_at_time(self, y: np.ndarray, sr: int, time: float) -> float:
         """指定時刻のスペクトル重心を取得"""
