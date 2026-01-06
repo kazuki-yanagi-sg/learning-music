@@ -417,14 +417,15 @@ class LibrosaTranscriber:
             }
 
     def _bandpass_filter(self, y: np.ndarray, sr: int, low: float, high: float) -> np.ndarray:
-        """バンドパスフィルタを適用"""
+        """バンドパスフィルタを適用（SOS形式で数値安定性を確保）"""
         nyquist = sr / 2
         low_norm = max(low / nyquist, 0.001)
         high_norm = min(high / nyquist, 0.999)
         if low_norm >= high_norm:
             return y
-        b, a = signal.butter(4, [low_norm, high_norm], btype='band')
-        return signal.filtfilt(b, a, y)
+        # SOS形式を使用（低周波数で数値的に安定）
+        sos = signal.butter(4, [low_norm, high_norm], btype='band', output='sos')
+        return signal.sosfiltfilt(sos, y)
 
     def _detect_band_onsets(self, y: np.ndarray, sr: int, tempo: float = None, delta: float = 0.05) -> np.ndarray:
         """帯域別オンセット検出"""
