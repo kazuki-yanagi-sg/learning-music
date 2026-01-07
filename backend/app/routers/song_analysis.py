@@ -569,3 +569,47 @@ async def analyze_4tracks(video_id: str):
                 downloader.cleanup(audio_path)
         except Exception:
             pass
+
+
+# --- 範囲指定解説API ---
+
+class SectionAnalysisRequest(BaseModel):
+    """範囲指定解説リクエスト"""
+    track_name: str
+    tempo: int = 120
+    start_time: float
+    end_time: float
+    tracks: dict  # { melody: [], drums: [], bass: [], other: [] }
+
+
+@router.post("/explain-section")
+async def explain_section(request: SectionAnalysisRequest):
+    """
+    指定区間のAI解説を生成
+
+    フロントエンドからノートデータを受け取り、
+    Geminiで解説を生成して返す
+    """
+    try:
+        gemini = get_gemini_service()
+        analysis_text = await gemini.generate_section_analysis(
+            track_name=request.track_name,
+            tempo=request.tempo,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            tracks_data=request.tracks,
+        )
+
+        return {
+            "success": True,
+            "data": {
+                "analysis_text": analysis_text,
+                "section": {
+                    "start": request.start_time,
+                    "end": request.end_time,
+                },
+            },
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"解説生成エラー: {str(e)}")

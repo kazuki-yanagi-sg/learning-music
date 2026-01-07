@@ -190,3 +190,46 @@ export function analyzeVideoWithProgress(
     }
   }
 }
+
+/**
+ * 指定区間のAI解説を取得
+ */
+export interface SectionAnalysisRequest {
+  track_name: string
+  tempo: number
+  start_time: number
+  end_time: number
+  tracks: {
+    melody?: NoteInfo[]
+    drums?: NoteInfo[]
+    bass?: NoteInfo[]
+    other?: NoteInfo[]
+  }
+}
+
+export interface SectionAnalysisResponse {
+  success: boolean
+  data?: {
+    analysis_text: string
+    section: {
+      start: number
+      end: number
+    }
+  }
+  error?: string
+}
+
+export async function explainSection(request: SectionAnalysisRequest): Promise<SectionAnalysisResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/v1/song-analysis/explain-section`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(request),
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    return { success: false, error: text }
+  }
+
+  return response.json()
+}

@@ -19,6 +19,26 @@ from app.prompts import (
     TRANSCRIBE_OTHER_PROMPT,
 )
 
+# 範囲指定解説用プロンプト
+SECTION_ANALYSIS_PROMPT = """
+あなたは音楽理論の専門家です。以下の楽曲の指定区間について、初心者にもわかりやすく解説してください。
+
+## 楽曲情報
+- 曲名: {track_name}
+- テンポ: {tempo} BPM
+- 解析区間: {start_time:.1f}秒 〜 {end_time:.1f}秒
+
+## この区間のノート情報
+{notes_summary}
+
+## 解説してほしいこと
+1. この区間で使われている音楽的な特徴（コード、スケール、リズムパターンなど）
+2. アニソン/J-POPでよく使われるテクニックとの関連
+3. 作曲に活かせるポイント
+
+簡潔に、200〜300文字程度で解説してください。
+"""
+
 
 def _extract_json(text: str) -> dict:
     """
@@ -110,6 +130,70 @@ class GeminiService:
             tempo=tempo,
             chord_progression=chord_str,
             notes_count=notes_count,
+        )
+
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+            )
+            return response.text
+        except Exception as e:
+            return f"解説の生成に失敗しました: {str(e)}"
+
+    async def generate_section_analysis(
+        self,
+        track_name: str,
+        tempo: int,
+        start_time: float,
+        end_time: float,
+        tracks_data: dict,
+    ) -> str:
+        """
+        指定区間の解説を生成
+
+        Args:
+            track_name: 曲名
+            tempo: テンポ（BPM）
+            start_time: 開始時間（秒）
+            end_time: 終了時間（秒）
+            tracks_data: 各トラックのノート情報
+                {
+                    "melody": [{ pitch, start, end }, ...],
+                    "drums": [...],
+                    "bass": [...],
+                    "other": [...]
+                }
+
+        Returns:
+            解説テキスト
+        """
+        # ノート情報をサマリー化
+        def summarize_track(name: str, notes: list) -> str:
+            if not notes:
+                return f"- {name}: なし"
+            # 時間範囲内のノートをフィルタ
+            filtered = [n for n in notes if n.get('start', 0) >= start_time and n.get('start', 0) < end_time]
+            if not filtered:
+                return f"- {name}: この区間にノートなし"
+            # ピッチの分布
+            pitches = [n.get('pitch', 0) for n in filtered]
+            min_p, max_p = min(pitches), max(pitches)
+            return f"- {name}: {len(filtered)}ノート (音域: {min_p}〜{max_p})"
+
+        notes_summary = "\n".join([
+            summarize_track("メロディ", tracks_data.get("melody", [])),
+            summarize_track("ドラム", tracks_data.get("drums", [])),
+            summarize_track("ベース", tracks_data.get("bass", [])),
+            summarize_track("その他", tracks_data.get("other", [])),
+        ])
+
+        prompt = SECTION_ANALYSIS_PROMPT.format(
+            track_name=track_name,
+            tempo=tempo,
+            start_time=start_time,
+            end_time=end_time,
+            notes_summary=notes_summary,
         )
 
         try:

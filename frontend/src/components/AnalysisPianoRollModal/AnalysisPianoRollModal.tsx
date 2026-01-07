@@ -6,7 +6,7 @@
  * - ベース/その他: ピアノロール形式
  */
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
-import { AnalysisResult, FourTrackResult, NoteInfo } from '../../services/songAnalysisApi'
+import { AnalysisResult, FourTrackResult, NoteInfo, explainSection } from '../../services/songAnalysisApi'
 import { audioEngine } from '../../services/audioEngine'
 import { AnalysisDrumGrid } from './AnalysisDrumGrid'
 
@@ -287,6 +287,10 @@ export function AnalysisPianoRollModal({
   // トラックデータをrefで保持（シーク時に参照）
   const tracksDataRef = useRef<typeof tracksData | null>(null)
 
+  // AI解説機能
+  const [sectionAnalysis, setSectionAnalysis] = useState<string | null>(null)
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+
   // トラックデータ
   const tracksData = useMemo(() => {
     if (isFourTrackResult(result)) {
@@ -365,6 +369,44 @@ export function AnalysisPianoRollModal({
     setPlaybackTime(time)
     setIsPlaying(true)
   }, [audioInitialized, result, mutedTracks])
+
+  // AI解説を取得（現在位置 ± 5秒）
+  const handleExplainSection = useCallback(async () => {
+    if (!isFourTrackResult(result)) return
+
+    setIsAnalyzing(true)
+    setSectionAnalysis(null)
+
+    // 現在位置を中心に±5秒（最小0秒）
+    const center = playbackTime || 0
+    const startTime = Math.max(0, center - 5)
+    const endTime = center + 5
+
+    try {
+      const response = await explainSection({
+        track_name: result.title,
+        tempo: result.tempo || 120,
+        start_time: startTime,
+        end_time: endTime,
+        tracks: {
+          melody: result.tracks.melody?.notes,
+          drums: result.tracks.drums?.notes,
+          bass: result.tracks.bass?.notes,
+          other: result.tracks.other?.notes,
+        },
+      })
+
+      if (response.success && response.data) {
+        setSectionAnalysis(response.data.analysis_text)
+      } else {
+        setSectionAnalysis(`エラー: ${response.error || '不明なエラー'}`)
+      }
+    } catch (e) {
+      setSectionAnalysis(`エラー: ${e instanceof Error ? e.message : '不明'}`)
+    } finally {
+      setIsAnalyzing(false)
+    }
+  }, [result, playbackTime])
 
   // 再生/停止
   const handlePlayToggle = useCallback(async () => {
@@ -471,6 +513,22 @@ export function AnalysisPianoRollModal({
               {isPlaying ? '⏹ Stop' : '▶ Play'}
             </button>
 
+            {/* AI解説ボタン */}
+            {is4Track && (
+              <button
+                onClick={handleExplainSection}
+                disabled={isAnalyzing}
+                className={`px-3 py-1 rounded font-bold ${
+                  isAnalyzing
+                    ? 'bg-gray-600 cursor-wait'
+                    : 'bg-purple-600 hover:bg-purple-700'
+                } text-white text-sm`}
+                title={`${Math.max(0, (playbackTime || 0) - 5).toFixed(0)}〜${((playbackTime || 0) + 5).toFixed(0)}秒を解説`}
+              >
+                {isAnalyzing ? '解析中...' : '🤖 AI解説'}
+              </button>
+            )}
+
             {isPlaying && (
               <span className="text-sm text-gray-300 font-mono w-16">
                 {Math.floor(playbackTime / 60)}:{String(Math.floor(playbackTime % 60)).padStart(2, '0')}
@@ -504,6 +562,26 @@ export function AnalysisPianoRollModal({
             </button>
           </div>
         </div>
+
+        {/* AI解説表示 */}
+        {sectionAnalysis && (
+          <div className="mx-4 my-2 p-3 bg-purple-900/50 border border-purple-700 rounded-lg">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex-1">
+                <div className="text-xs text-purple-300 mb-1">
+                  🤖 AI解説 ({Math.max(0, (playbackTime || 0) - 5).toFixed(0)}〜{((playbackTime || 0) + 5).toFixed(0)}秒)
+                </div>
+                <p className="text-sm text-gray-200 whitespace-pre-wrap">{sectionAnalysis}</p>
+              </div>
+              <button
+                onClick={() => setSectionAnalysis(null)}
+                className="text-gray-400 hover:text-white"
+              >
+                ×
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* トラック別ピアノロール */}
         <div className="flex-1 overflow-y-auto">
