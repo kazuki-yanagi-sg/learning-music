@@ -74,6 +74,7 @@ interface TrackPianoRollProps {
   isPlaying: boolean
   isMuted: boolean
   onToggleMute: () => void
+  onSeek?: (time: number) => void  // シーク機能追加
 }
 
 function TrackPianoRoll({
@@ -85,6 +86,7 @@ function TrackPianoRoll({
   isPlaying,
   isMuted,
   onToggleMute,
+  onSeek,
 }: TrackPianoRollProps) {
   const config = TRACK_CONFIG[trackType]
   const containerRef = useRef<HTMLDivElement>(null)
@@ -176,9 +178,20 @@ function TrackPianoRoll({
           ))}
         </div>
 
-        {/* グリッド */}
+        {/* グリッド（クリックでシーク） */}
         <div ref={containerRef} className="flex-1 overflow-x-auto overflow-y-hidden">
-          <svg width={gridWidth} height={gridHeight} className="block">
+          <svg
+            width={gridWidth}
+            height={gridHeight}
+            className="block cursor-pointer"
+            onClick={(e) => {
+              if (!onSeek) return
+              const rect = e.currentTarget.getBoundingClientRect()
+              const x = e.clientX - rect.left + (containerRef.current?.scrollLeft || 0)
+              const time = x / pixelsPerSecond
+              onSeek(Math.max(0, Math.min(time, maxTime)))
+            }}
+          >
             {/* 背景 */}
             {pitches.map((pitch, idx) => (
               <rect
@@ -268,8 +281,11 @@ export function AnalysisPianoRollModal({
   // 再生状態
   const [isPlaying, setIsPlaying] = useState(false)
   const [playbackTime, setPlaybackTime] = useState(0)
-  const playbackRef = useRef<{ stop: () => void } | null>(null)
+  const playbackRef = useRef<{ stop: () => void; seek?: (time: number) => void } | null>(null)
   const [audioInitialized, setAudioInitialized] = useState(false)
+
+  // トラックデータをrefで保持（シーク時に参照）
+  const tracksDataRef = useRef<typeof tracksData | null>(null)
 
   // トラックデータ
   const tracksData = useMemo(() => {
@@ -292,6 +308,11 @@ export function AnalysisPianoRollModal({
     return Math.max(...allNotes.map(n => n.end)) + 2
   }, [tracksData])
 
+  // tracksDataをrefに保存
+  useEffect(() => {
+    tracksDataRef.current = tracksData
+  }, [tracksData])
+
   // ミュート切り替え
   const toggleMute = useCallback((trackType: string) => {
     setMutedTracks(prev => {
@@ -304,6 +325,46 @@ export function AnalysisPianoRollModal({
       return next
     })
   }, [])
+
+  // シーク（クリック位置から再生）
+  const handleSeek = useCallback(async (time: number) => {
+    // 初期化
+    if (!audioInitialized) {
+      await audioEngine.init()
+      setAudioInitialized(true)
+    }
+
+    // 現在の再生を停止
+    playbackRef.current?.stop()
+
+    const onProgress = (t: number) => {
+      setPlaybackTime(t)
+      if (t === 0) setIsPlaying(false)
+    }
+
+    if (isFourTrackResult(result)) {
+      playbackRef.current = audioEngine.play4TrackAnalysis(
+        {
+          drums: mutedTracks.has('drums') ? [] : result.tracks.drums?.notes,
+          bass: mutedTracks.has('bass') ? [] : result.tracks.bass?.notes,
+          other: mutedTracks.has('other') ? [] : result.tracks.other?.notes,
+          melody: mutedTracks.has('melody') ? [] : result.tracks.melody?.notes,
+        },
+        mutedTracks,
+        onProgress,
+        time  // 開始位置を指定
+      )
+    } else {
+      // 単一トラックの場合は最初から（シーク未対応）
+      playbackRef.current = audioEngine.playAnalysisNotes(
+        result.notes || [],
+        'default',
+        onProgress
+      )
+    }
+    setPlaybackTime(time)
+    setIsPlaying(true)
+  }, [audioInitialized, result, mutedTracks])
 
   // 再生/停止
   const handlePlayToggle = useCallback(async () => {
@@ -459,6 +520,7 @@ export function AnalysisPianoRollModal({
                 isPlaying={isPlaying}
                 isMuted={mutedTracks.has('melody')}
                 onToggleMute={() => toggleMute('melody')}
+                onSeek={handleSeek}
               />
               {/* ドラムは専用グリッド */}
               <AnalysisDrumGrid
@@ -470,6 +532,7 @@ export function AnalysisPianoRollModal({
                 isMuted={mutedTracks.has('drums')}
                 onToggleMute={() => toggleMute('drums')}
                 tempo={result.tempo || 120}
+                onSeek={handleSeek}
               />
               {/* ベース・その他はピアノロール */}
               {(['bass', 'other'] as TrackType[]).map(trackType => {
@@ -485,6 +548,7 @@ export function AnalysisPianoRollModal({
                     isPlaying={isPlaying}
                     isMuted={mutedTracks.has(trackType)}
                     onToggleMute={() => toggleMute(trackType)}
+                    onSeek={handleSeek}
                   />
                 )
               })}
@@ -500,13 +564,14 @@ export function AnalysisPianoRollModal({
               isPlaying={isPlaying}
               isMuted={false}
               onToggleMute={() => {}}
+              onSeek={handleSeek}
             />
           )}
         </div>
 
         {/* フッター */}
         <div className="px-4 py-2 border-t border-gray-700 bg-gray-800 text-xs text-gray-400">
-          Space: Play/Stop | Scroll: horizontal scroll | M: Mute track
+          Space: Play/Stop | Click: Seek to position | Scroll: horizontal scroll | M: Mute track
         </div>
       </div>
     </div>

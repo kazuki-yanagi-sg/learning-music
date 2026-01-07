@@ -6,7 +6,7 @@
 # 構成:
 #   - frontend: Docker (port 5173)
 #   - voicevox: Docker (port 50021)
-#   - backend: ホスト実行 (port 8000) - Demucs/PyTorchのMPS対応のため
+#   - backend: ホスト実行 (port 8001) - Demucs/PyTorchのMPS対応のため
 
 set -e
 
@@ -150,7 +150,7 @@ start_backend() {
     mkdir -p "$SCRIPT_DIR/storage/midi"
 
     cd backend
-    uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 }
 
 # クリーンアップ
@@ -179,8 +179,8 @@ main() {
     echo ""
     echo_info "起動完了!"
     echo "  Frontend: http://localhost:5173"
-    echo "  Backend:  http://localhost:8000"
-    echo "  API Docs: http://localhost:8000/docs"
+    echo "  Backend:  http://localhost:8001"
+    echo "  API Docs: http://localhost:8001/docs"
     echo ""
     echo_info "終了するには Ctrl+C を押してください"
     echo ""

@@ -598,6 +598,7 @@ class AudioEngine {
 
   /**
    * 4トラックの解析結果を再生（melody追加）
+   * @param startFrom 開始位置（秒）- 指定した位置から再生開始
    */
   play4TrackAnalysis(
     tracks: {
@@ -607,10 +608,11 @@ class AudioEngine {
       melody?: Array<{ pitch: number; start: number; end: number }>;
     },
     mutedTracks: Set<string> = new Set(),
-    onProgress?: (time: number) => void
-  ): { stop: () => void } {
+    onProgress?: (time: number) => void,
+    startFrom: number = 0
+  ): { stop: () => void; seek: (time: number) => void } {
     if (!this.isInitialized) {
-      return { stop: () => {} }
+      return { stop: () => {}, seek: () => {} }
     }
 
     this.stop()
@@ -619,7 +621,7 @@ class AudioEngine {
     const transport = Tone.getTransport()
     transport.bpm.value = 60
 
-    // 各トラックのノートをスケジュール
+    // 各トラックのノートをスケジュール（startFromより後のノートのみ）
     const scheduleTrack = (
       notes: Array<{ pitch: number; start: number; end: number }> | undefined,
       trackType: 'drums' | 'bass' | 'other' | 'melody'
@@ -627,7 +629,11 @@ class AudioEngine {
       if (!notes || mutedTracks.has(trackType)) return
 
       notes.forEach((note) => {
-        const startTime = note.start
+        // startFromより前に終わるノートはスキップ
+        if (note.end <= startFrom) return
+
+        // 開始時間を調整（startFromを0として再計算）
+        const adjustedStart = Math.max(0, note.start - startFrom)
         const duration = Math.max(0.05, note.end - note.start)
 
         const eventId = transport.schedule((time) => {
@@ -662,7 +668,7 @@ class AudioEngine {
               }
               break
           }
-        }, startTime)
+        }, adjustedStart)
 
         this.scheduledEvents.push(eventId)
       })
@@ -673,12 +679,12 @@ class AudioEngine {
     scheduleTrack(tracks.other, 'other')
     scheduleTrack(tracks.melody, 'melody')
 
-    // 進捗コールバック
+    // 進捗コールバック（startFromを加算して実際の時間を返す）
     let progressInterval: number | null = null
     if (onProgress) {
       progressInterval = window.setInterval(() => {
         if (this.isPlaying) {
-          onProgress(transport.seconds)
+          onProgress(transport.seconds + startFrom)
         }
       }, 50)
     }
@@ -690,7 +696,7 @@ class AudioEngine {
       ...(tracks.other || []),
       ...(tracks.melody || []),
     ]
-    const maxTime = allNotes.length > 0 ? Math.max(...allNotes.map((n) => n.end)) + 1 : 0
+    const maxTime = allNotes.length > 0 ? Math.max(...allNotes.map((n) => n.end)) - startFrom + 1 : 0
 
     if (maxTime > 0) {
       const endEventId = transport.schedule(() => {
@@ -703,10 +709,24 @@ class AudioEngine {
 
     transport.start()
 
+    // シーク関数を保存（再利用のため）
+    const allTracksData = tracks
+    const currentMutedTracks = mutedTracks
+    const currentOnProgress = onProgress
+
     return {
       stop: () => {
         this.stop()
         if (progressInterval) clearInterval(progressInterval)
+      },
+      seek: (time: number) => {
+        // 現在の再生を停止して新しい位置から再開
+        this.stop()
+        if (progressInterval) clearInterval(progressInterval)
+        // 再帰的に新しい位置から再生開始
+        const newPlayback = this.play4TrackAnalysis(allTracksData, currentMutedTracks, currentOnProgress, time)
+        // 参照を更新できないので、stopだけ動作するようにする
+        Object.assign(this, { _currentPlayback: newPlayback })
       },
     }
   }
