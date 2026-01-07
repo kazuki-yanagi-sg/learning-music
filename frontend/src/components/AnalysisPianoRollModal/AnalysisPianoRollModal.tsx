@@ -74,7 +74,13 @@ interface TrackPianoRollProps {
   isPlaying: boolean
   isMuted: boolean
   onToggleMute: () => void
-  onSeek?: (time: number) => void  // シーク機能追加
+  onSeek?: (time: number) => void
+  // ドラッグ選択
+  onDragStart?: (time: number) => void
+  onDragMove?: (time: number) => void
+  onDragEnd?: () => void
+  selectionStart?: number | null
+  selectionEnd?: number | null
 }
 
 function TrackPianoRoll({
@@ -87,6 +93,11 @@ function TrackPianoRoll({
   isMuted,
   onToggleMute,
   onSeek,
+  onDragStart,
+  onDragMove,
+  onDragEnd,
+  selectionStart,
+  selectionEnd,
 }: TrackPianoRollProps) {
   const config = TRACK_CONFIG[trackType]
   const containerRef = useRef<HTMLDivElement>(null)
@@ -178,19 +189,39 @@ function TrackPianoRoll({
           ))}
         </div>
 
-        {/* グリッド（クリックでシーク） */}
+        {/* グリッド（クリック=シーク、ドラッグ=範囲選択） */}
         <div ref={containerRef} className="flex-1 overflow-x-auto overflow-y-hidden">
           <svg
             width={gridWidth}
             height={gridHeight}
-            className="block cursor-pointer"
-            onClick={(e) => {
-              if (!onSeek) return
+            className="block cursor-crosshair select-none"
+            onMouseDown={(e) => {
               const rect = e.currentTarget.getBoundingClientRect()
               const x = e.clientX - rect.left + (containerRef.current?.scrollLeft || 0)
-              const time = x / pixelsPerSecond
-              onSeek(Math.max(0, Math.min(time, maxTime)))
+              const time = Math.max(0, Math.min(x / pixelsPerSecond, maxTime))
+              onDragStart?.(time)
             }}
+            onMouseMove={(e) => {
+              if (!onDragMove) return
+              const rect = e.currentTarget.getBoundingClientRect()
+              const x = e.clientX - rect.left + (containerRef.current?.scrollLeft || 0)
+              const time = Math.max(0, Math.min(x / pixelsPerSecond, maxTime))
+              onDragMove(time)
+            }}
+            onMouseUp={(e) => {
+              // ドラッグ距離が短ければクリック扱い（シーク）
+              const start = selectionStart ?? 0
+              const end = selectionEnd ?? 0
+              const distance = Math.abs(end - start)
+              if (distance < 0.5 && onSeek) {
+                const rect = e.currentTarget.getBoundingClientRect()
+                const x = e.clientX - rect.left + (containerRef.current?.scrollLeft || 0)
+                const time = Math.max(0, Math.min(x / pixelsPerSecond, maxTime))
+                onSeek(time)
+              }
+              onDragEnd?.()
+            }}
+            onMouseLeave={() => onDragEnd?.()}
           >
             {/* 背景 */}
             {pitches.map((pitch, idx) => (
@@ -251,14 +282,27 @@ function TrackPianoRoll({
               )
             })}
 
-            {/* プレイヘッド */}
-            {isPlaying && playbackTime > 0 && (
+            {/* 選択範囲 */}
+            {selectionStart != null && selectionEnd != null && Math.abs(selectionEnd - selectionStart) > 0.1 && (
+              <rect
+                x={Math.min(selectionStart, selectionEnd) * pixelsPerSecond}
+                y={0}
+                width={Math.abs(selectionEnd - selectionStart) * pixelsPerSecond}
+                height={gridHeight}
+                fill="rgba(168, 85, 247, 0.3)"
+                stroke="#a855f7"
+                strokeWidth={1}
+              />
+            )}
+
+            {/* プレイヘッド（常に表示） */}
+            {playbackTime > 0 && (
               <line
                 x1={playbackTime * pixelsPerSecond}
                 y1={0}
                 x2={playbackTime * pixelsPerSecond}
                 y2={gridHeight}
-                stroke="#fff"
+                stroke={isPlaying ? '#fff' : '#888'}
                 strokeWidth={2}
               />
             )}
@@ -290,6 +334,11 @@ export function AnalysisPianoRollModal({
   // AI解説機能
   const [sectionAnalysis, setSectionAnalysis] = useState<string | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
+
+  // 範囲選択（ドラッグ）
+  const [selectionStart, setSelectionStart] = useState<number | null>(null)
+  const [selectionEnd, setSelectionEnd] = useState<number | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
 
   // トラックデータ
   const tracksData = useMemo(() => {
@@ -330,64 +379,69 @@ export function AnalysisPianoRollModal({
     })
   }, [])
 
-  // シーク（クリック位置から再生）
-  const handleSeek = useCallback(async (time: number) => {
-    // 初期化
-    if (!audioInitialized) {
-      await audioEngine.init()
-      setAudioInitialized(true)
-    }
-
-    // 現在の再生を停止
-    playbackRef.current?.stop()
-
-    const onProgress = (t: number) => {
-      setPlaybackTime(t)
-      if (t === 0) setIsPlaying(false)
-    }
-
-    if (isFourTrackResult(result)) {
-      playbackRef.current = audioEngine.play4TrackAnalysis(
-        {
-          drums: mutedTracks.has('drums') ? [] : result.tracks.drums?.notes,
-          bass: mutedTracks.has('bass') ? [] : result.tracks.bass?.notes,
-          other: mutedTracks.has('other') ? [] : result.tracks.other?.notes,
-          melody: mutedTracks.has('melody') ? [] : result.tracks.melody?.notes,
-        },
-        mutedTracks,
-        onProgress,
-        time  // 開始位置を指定
-      )
-    } else {
-      // 単一トラックの場合は最初から（シーク未対応）
-      playbackRef.current = audioEngine.playAnalysisNotes(
-        result.notes || [],
-        'default',
-        onProgress
-      )
+  // クリック = 位置セットのみ（再生しない）
+  const handleSeek = useCallback((time: number) => {
+    // 再生中なら停止
+    if (isPlaying) {
+      playbackRef.current?.stop()
+      setIsPlaying(false)
     }
     setPlaybackTime(time)
-    setIsPlaying(true)
-  }, [audioInitialized, result, mutedTracks])
+    // 範囲選択をクリア
+    setSelectionStart(null)
+    setSelectionEnd(null)
+  }, [isPlaying])
 
-  // AI解説を取得（現在位置 ± 5秒）
+  // ドラッグ開始
+  const handleDragStart = useCallback((time: number) => {
+    setIsDragging(true)
+    setSelectionStart(time)
+    setSelectionEnd(time)
+  }, [])
+
+  // ドラッグ中
+  const handleDragMove = useCallback((time: number) => {
+    if (isDragging) {
+      setSelectionEnd(time)
+    }
+  }, [isDragging])
+
+  // ドラッグ終了
+  const handleDragEnd = useCallback(() => {
+    setIsDragging(false)
+  }, [])
+
+  // 選択範囲を計算（ドラッグ選択 or 現在位置±5秒）
+  const analysisRange = useMemo(() => {
+    if (selectionStart !== null && selectionEnd !== null) {
+      const start = Math.min(selectionStart, selectionEnd)
+      const end = Math.max(selectionStart, selectionEnd)
+      if (end - start > 0.5) {  // 0.5秒以上の範囲
+        return { start, end, isSelection: true }
+      }
+    }
+    // デフォルト: 現在位置±5秒
+    const center = playbackTime || 0
+    return {
+      start: Math.max(0, center - 5),
+      end: center + 5,
+      isSelection: false,
+    }
+  }, [selectionStart, selectionEnd, playbackTime])
+
+  // AI解説を取得
   const handleExplainSection = useCallback(async () => {
     if (!isFourTrackResult(result)) return
 
     setIsAnalyzing(true)
     setSectionAnalysis(null)
 
-    // 現在位置を中心に±5秒（最小0秒）
-    const center = playbackTime || 0
-    const startTime = Math.max(0, center - 5)
-    const endTime = center + 5
-
     try {
       const response = await explainSection({
         track_name: result.title,
         tempo: result.tempo || 120,
-        start_time: startTime,
-        end_time: endTime,
+        start_time: analysisRange.start,
+        end_time: analysisRange.end,
         tracks: {
           melody: result.tracks.melody?.notes,
           drums: result.tracks.drums?.notes,
@@ -406,15 +460,14 @@ export function AnalysisPianoRollModal({
     } finally {
       setIsAnalyzing(false)
     }
-  }, [result, playbackTime])
+  }, [result, analysisRange])
 
-  // 再生/停止
+  // 再生/停止（現在位置から開始）
   const handlePlayToggle = useCallback(async () => {
     if (isPlaying) {
       playbackRef.current?.stop()
       playbackRef.current = null
       setIsPlaying(false)
-      setPlaybackTime(0)
     } else {
       if (!audioInitialized) {
         await audioEngine.init()
@@ -435,7 +488,8 @@ export function AnalysisPianoRollModal({
             melody: mutedTracks.has('melody') ? [] : result.tracks.melody?.notes,
           },
           mutedTracks,
-          onProgress
+          onProgress,
+          playbackTime  // 現在位置から再生
         )
       } else {
         playbackRef.current = audioEngine.playAnalysisNotes(
@@ -446,7 +500,7 @@ export function AnalysisPianoRollModal({
       }
       setIsPlaying(true)
     }
-  }, [isPlaying, audioInitialized, result, mutedTracks])
+  }, [isPlaying, audioInitialized, result, mutedTracks, playbackTime])
 
   // クリーンアップ
   useEffect(() => {
@@ -521,11 +575,13 @@ export function AnalysisPianoRollModal({
                 className={`px-3 py-1 rounded font-bold ${
                   isAnalyzing
                     ? 'bg-gray-600 cursor-wait'
-                    : 'bg-purple-600 hover:bg-purple-700'
+                    : analysisRange.isSelection
+                      ? 'bg-purple-500 hover:bg-purple-600 ring-2 ring-purple-300'
+                      : 'bg-purple-600 hover:bg-purple-700'
                 } text-white text-sm`}
-                title={`${Math.max(0, (playbackTime || 0) - 5).toFixed(0)}〜${((playbackTime || 0) + 5).toFixed(0)}秒を解説`}
+                title={`${analysisRange.start.toFixed(1)}〜${analysisRange.end.toFixed(1)}秒を解説`}
               >
-                {isAnalyzing ? '解析中...' : '🤖 AI解説'}
+                {isAnalyzing ? '解析中...' : analysisRange.isSelection ? `🤖 選択範囲を解説` : '🤖 AI解説'}
               </button>
             )}
 
@@ -569,7 +625,7 @@ export function AnalysisPianoRollModal({
             <div className="flex items-start justify-between gap-2">
               <div className="flex-1">
                 <div className="text-xs text-purple-300 mb-1">
-                  🤖 AI解説 ({Math.max(0, (playbackTime || 0) - 5).toFixed(0)}〜{((playbackTime || 0) + 5).toFixed(0)}秒)
+                  🤖 AI解説 ({analysisRange.start.toFixed(1)}〜{analysisRange.end.toFixed(1)}秒)
                 </div>
                 <p className="text-sm text-gray-200 whitespace-pre-wrap">{sectionAnalysis}</p>
               </div>
@@ -599,6 +655,11 @@ export function AnalysisPianoRollModal({
                 isMuted={mutedTracks.has('melody')}
                 onToggleMute={() => toggleMute('melody')}
                 onSeek={handleSeek}
+                onDragStart={handleDragStart}
+                onDragMove={handleDragMove}
+                onDragEnd={handleDragEnd}
+                selectionStart={selectionStart}
+                selectionEnd={selectionEnd}
               />
               {/* ドラムは専用グリッド */}
               <AnalysisDrumGrid
@@ -611,6 +672,11 @@ export function AnalysisPianoRollModal({
                 onToggleMute={() => toggleMute('drums')}
                 tempo={result.tempo || 120}
                 onSeek={handleSeek}
+                onDragStart={handleDragStart}
+                onDragMove={handleDragMove}
+                onDragEnd={handleDragEnd}
+                selectionStart={selectionStart}
+                selectionEnd={selectionEnd}
               />
               {/* ベース・その他はピアノロール */}
               {(['bass', 'other'] as TrackType[]).map(trackType => {
@@ -627,6 +693,11 @@ export function AnalysisPianoRollModal({
                     isMuted={mutedTracks.has(trackType)}
                     onToggleMute={() => toggleMute(trackType)}
                     onSeek={handleSeek}
+                    onDragStart={handleDragStart}
+                    onDragMove={handleDragMove}
+                    onDragEnd={handleDragEnd}
+                    selectionStart={selectionStart}
+                    selectionEnd={selectionEnd}
                   />
                 )
               })}
@@ -643,13 +714,18 @@ export function AnalysisPianoRollModal({
               isMuted={false}
               onToggleMute={() => {}}
               onSeek={handleSeek}
+              onDragStart={handleDragStart}
+              onDragMove={handleDragMove}
+              onDragEnd={handleDragEnd}
+              selectionStart={selectionStart}
+              selectionEnd={selectionEnd}
             />
           )}
         </div>
 
         {/* フッター */}
         <div className="px-4 py-2 border-t border-gray-700 bg-gray-800 text-xs text-gray-400">
-          Space: Play/Stop | Click: Seek to position | Scroll: horizontal scroll | M: Mute track
+          Space: Play/Stop | Click: 位置移動 | Drag: 範囲選択 | M: Mute
         </div>
       </div>
     </div>

@@ -54,6 +54,11 @@ interface AnalysisDrumGridProps {
   onToggleMute: () => void
   tempo?: number
   onSeek?: (time: number) => void
+  onDragStart?: (time: number) => void
+  onDragMove?: (time: number) => void
+  onDragEnd?: () => void
+  selectionStart?: number | null
+  selectionEnd?: number | null
 }
 
 export function AnalysisDrumGrid({
@@ -66,6 +71,11 @@ export function AnalysisDrumGrid({
   onToggleMute,
   tempo = 120,
   onSeek,
+  onDragStart,
+  onDragMove,
+  onDragEnd,
+  selectionStart,
+  selectionEnd,
 }: AnalysisDrumGridProps) {
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -179,19 +189,38 @@ export function AnalysisDrumGrid({
           ))}
         </div>
 
-        {/* グリッド（クリックでシーク） */}
+        {/* グリッド（クリック=シーク、ドラッグ=範囲選択） */}
         <div ref={containerRef} className="flex-1 overflow-x-auto overflow-y-hidden">
           <svg
             width={gridWidth}
             height={gridHeight}
-            className="block cursor-pointer"
-            onClick={(e) => {
-              if (!onSeek) return
+            className="block cursor-crosshair select-none"
+            onMouseDown={(e) => {
               const rect = e.currentTarget.getBoundingClientRect()
               const x = e.clientX - rect.left + (containerRef.current?.scrollLeft || 0)
-              const time = x / pixelsPerSecond
-              onSeek(Math.max(0, Math.min(time, maxTime)))
+              const time = Math.max(0, Math.min(x / pixelsPerSecond, maxTime))
+              onDragStart?.(time)
             }}
+            onMouseMove={(e) => {
+              if (!onDragMove) return
+              const rect = e.currentTarget.getBoundingClientRect()
+              const x = e.clientX - rect.left + (containerRef.current?.scrollLeft || 0)
+              const time = Math.max(0, Math.min(x / pixelsPerSecond, maxTime))
+              onDragMove(time)
+            }}
+            onMouseUp={(e) => {
+              const start = selectionStart ?? 0
+              const end = selectionEnd ?? 0
+              const distance = Math.abs(end - start)
+              if (distance < 0.5 && onSeek) {
+                const rect = e.currentTarget.getBoundingClientRect()
+                const x = e.clientX - rect.left + (containerRef.current?.scrollLeft || 0)
+                const time = Math.max(0, Math.min(x / pixelsPerSecond, maxTime))
+                onSeek(time)
+              }
+              onDragEnd?.()
+            }}
+            onMouseLeave={() => onDragEnd?.()}
           >
             {/* 背景行 */}
             {DRUM_ROWS.map((drum, idx) => (
@@ -281,14 +310,27 @@ export function AnalysisDrumGrid({
               )
             })}
 
-            {/* プレイヘッド */}
-            {isPlaying && playbackTime > 0 && (
+            {/* 選択範囲 */}
+            {selectionStart != null && selectionEnd != null && Math.abs(selectionEnd - selectionStart) > 0.1 && (
+              <rect
+                x={Math.min(selectionStart, selectionEnd) * pixelsPerSecond}
+                y={0}
+                width={Math.abs(selectionEnd - selectionStart) * pixelsPerSecond}
+                height={gridHeight}
+                fill="rgba(168, 85, 247, 0.3)"
+                stroke="#a855f7"
+                strokeWidth={1}
+              />
+            )}
+
+            {/* プレイヘッド（常に表示） */}
+            {playbackTime > 0 && (
               <line
                 x1={playbackTime * pixelsPerSecond}
                 y1={0}
                 x2={playbackTime * pixelsPerSecond}
                 y2={gridHeight}
-                stroke="#fff"
+                stroke={isPlaying ? '#fff' : '#888'}
                 strokeWidth={2}
               />
             )}
