@@ -10,22 +10,38 @@ from pathlib import Path
 from typing import Optional
 import numpy as np
 
-# scipy互換性修正（scipy.signal.gaussian → scipy.signal.windows.gaussian）
-# https://github.com/spotify/basic-pitch/issues/120
-import scipy.signal
-import scipy.signal.windows
-if not hasattr(scipy.signal, 'gaussian'):
-    scipy.signal.gaussian = scipy.signal.windows.gaussian
+# basic-pitch / librosa / scipy は import が重く、純粋ロジック（quantize_time /
+# merge_notes / _normalize_drum_pitch 等）のテストには不要なため遅延 import する。
+# 実際に音声を変換するメソッドの冒頭で _ensure_basic_pitch() / _ensure_librosa() を呼ぶ。
+predict = None
+ICASSP_2022_MODEL_PATH = None
+librosa = None
 
-# Basic Pitch のインポート
-from basic_pitch.inference import predict
-from basic_pitch import ICASSP_2022_MODEL_PATH
 
-# テンポ検出用
-import librosa
+def _ensure_basic_pitch() -> None:
+    """Basic Pitch（predict / モデルパス）を遅延 import する"""
+    global predict, ICASSP_2022_MODEL_PATH
+    if predict is None:
+        # scipy互換性修正（scipy.signal.gaussian → scipy.signal.windows.gaussian）
+        # https://github.com/spotify/basic-pitch/issues/120
+        import scipy.signal
+        import scipy.signal.windows
+        if not hasattr(scipy.signal, 'gaussian'):
+            scipy.signal.gaussian = scipy.signal.windows.gaussian
 
-# デバッグ: 使用されるモデルパスを表示
-print(f"[BasicPitch] Model path: {ICASSP_2022_MODEL_PATH}")
+        from basic_pitch.inference import predict as _predict
+        from basic_pitch import ICASSP_2022_MODEL_PATH as _model_path
+        predict = _predict
+        ICASSP_2022_MODEL_PATH = _model_path
+        print(f"[BasicPitch] Model path: {ICASSP_2022_MODEL_PATH}")
+
+
+def _ensure_librosa() -> None:
+    """librosa（テンポ検出用）を遅延 import する"""
+    global librosa
+    if librosa is None:
+        import librosa as _librosa
+        librosa = _librosa
 
 
 class BasicPitchService:
@@ -33,14 +49,20 @@ class BasicPitchService:
 
     def __init__(self):
         """初期化（モデルはpredict時に自動ロード）"""
-        self.model_path = ICASSP_2022_MODEL_PATH
-        print(f"[BasicPitch] Using model: {self.model_path}")
+        # モデルパスは実際に変換するとき _ensure_model() で遅延解決する
+        self.model_path = None
         # 信頼度しきい値（これ以下のノートは除外）
         self.confidence_threshold = 0.25  # 0.3→0.25 ノートを拾いやすく
         # クオンタイズ解像度（16分音符 = 0.25拍）
         self.quantize_resolution = 0.25  # 0.5→0.25 精度UP
         # ノートマージ用の最大ギャップ（秒）
         self.merge_gap_threshold = 0.15  # 0.1→0.15 ぶつ切り軽減
+
+    def _ensure_model(self) -> None:
+        """Basic Pitch モデルパスを遅延解決する（初回の変換時に呼ばれる）"""
+        _ensure_basic_pitch()
+        if self.model_path is None:
+            self.model_path = ICASSP_2022_MODEL_PATH
 
     def detect_tempo(self, audio_path: str) -> tuple[float, np.ndarray]:
         """
@@ -50,6 +72,7 @@ class BasicPitchService:
             (tempo, beat_times): テンポ(BPM)とビート位置の配列
         """
         try:
+            _ensure_librosa()
             y, sr = librosa.load(audio_path, sr=22050)
             tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr)
             beat_times = librosa.frames_to_time(beat_frames, sr=sr)
@@ -174,6 +197,7 @@ class BasicPitchService:
             print(f"[BasicPitch] Detected tempo: {tempo:.1f} BPM")
 
             # 2. Basic Pitch で推論
+            self._ensure_model()
             model_output, midi_data, note_events = predict(
                 str(audio_file),
                 model_or_model_path=self.model_path,
@@ -292,6 +316,7 @@ class BasicPitchService:
                     "error": None,
                 }
 
+            self._ensure_model()
             model_output, midi_data, note_events = predict(
                 str(audio_file),
                 model_or_model_path=self.model_path,

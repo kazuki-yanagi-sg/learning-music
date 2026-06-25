@@ -8,8 +8,22 @@ TensorFlow不要の軽量な実装:
 from pathlib import Path
 from typing import Optional
 import numpy as np
-import librosa
-from scipy import signal
+
+# librosa / scipy.signal は import が重く、純粋ロジックのテストには不要なため遅延 import する。
+# 音声を実際に解析する入口メソッド（extract_melody / extract_drums）の冒頭で
+# _ensure_audio_libs() を呼び、以降の librosa.xxx / signal.xxx 参照を解決する。
+librosa = None
+signal = None
+
+
+def _ensure_audio_libs() -> None:
+    """重い音声ライブラリ（librosa / scipy.signal）を遅延 import する"""
+    global librosa, signal
+    if librosa is None:
+        import librosa as _librosa
+        from scipy import signal as _signal
+        librosa = _librosa
+        signal = _signal
 
 
 class LibrosaTranscriber:
@@ -61,6 +75,7 @@ class LibrosaTranscriber:
             }
 
         try:
+            _ensure_audio_libs()
             print(f"[Librosa] Loading audio: {audio_file}")
             # 音声を読み込み
             y, sr = librosa.load(str(audio_file), sr=22050, mono=True)
@@ -293,6 +308,7 @@ class LibrosaTranscriber:
             }
 
         try:
+            _ensure_audio_libs()
             print(f"[Librosa] Loading drum audio: {audio_file}")
             # 44100Hzで読み込み（高周波数を正確に捉えるため）
             y, sr = librosa.load(str(audio_file), sr=44100, mono=True)

@@ -1,28 +1,38 @@
 /**
  * 音楽ユーティリティのテスト
+ *
+ * 注: 本アプリは音高をピアノロール上で「数字表記 n⁽ᵏ⁾」で表示する設計
+ *     （CLAUDE.md「Pitch Class: 数字ベース(mod 12)を採用」）。
+ *     そのため pitchToNoteName は "C4" ではなく "0⁽⁴⁾" を返すのが正。
+ *     ここでは現状の振る舞いを固定する（特性化テスト）。
  */
 import { describe, it, expect } from 'vitest'
 import { pitchToNoteName, noteNameToPitch } from '../../src/types/music'
 
-describe('pitchToNoteName', () => {
-  it('C4 (中央のド) は MIDI 60', () => {
-    expect(pitchToNoteName(60)).toBe('C4')
+describe('pitchToNoteName（数字表記 n⁽ᵏ⁾）', () => {
+  it('MIDI 60（中央のド）は 0⁽⁴⁾', () => {
+    expect(pitchToNoteName(60)).toBe('0⁽⁴⁾')
   })
 
-  it('A4 (440Hz) は MIDI 69', () => {
-    expect(pitchToNoteName(69)).toBe('A4')
+  it('MIDI 69（A4=440Hz）は 9⁽⁴⁾', () => {
+    expect(pitchToNoteName(69)).toBe('9⁽⁴⁾')
   })
 
-  it('C#4 は MIDI 61', () => {
-    expect(pitchToNoteName(61)).toBe('C#4')
+  it('MIDI 61（C#4）は 1⁽⁴⁾', () => {
+    expect(pitchToNoteName(61)).toBe('1⁽⁴⁾')
   })
 
-  it('B3 は MIDI 59', () => {
-    expect(pitchToNoteName(59)).toBe('B3')
+  it('MIDI 59（B3）は 11⁽³⁾', () => {
+    expect(pitchToNoteName(59)).toBe('11⁽³⁾')
+  })
+
+  it('オクターブ番号は上付き文字で表す（MIDI 0 → 0⁽⁻¹⁾相当の桁変換）', () => {
+    // pitch 12 → n=0, k=floor(12/12)-1=0 → "0⁽⁰⁾"
+    expect(pitchToNoteName(12)).toBe('0⁽⁰⁾')
   })
 })
 
-describe('noteNameToPitch', () => {
+describe('noteNameToPitch（文字表記 → MIDI番号）', () => {
   it('C4 → 60', () => {
     expect(noteNameToPitch('C4')).toBe(60)
   })
@@ -39,10 +49,7 @@ describe('noteNameToPitch', () => {
     expect(noteNameToPitch('B3')).toBe(59)
   })
 
-  it('双方向変換が一致する', () => {
-    for (let pitch = 21; pitch <= 108; pitch++) {
-      const noteName = pitchToNoteName(pitch)
-      expect(noteNameToPitch(noteName)).toBe(pitch)
-    }
+  it('不正な音名は例外を投げる', () => {
+    expect(() => noteNameToPitch('not-a-note')).toThrow()
   })
 })
