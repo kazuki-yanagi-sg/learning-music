@@ -3,6 +3,7 @@
 
 Demucsを使用して音声を4トラック（drums, bass, vocals, other）に分離
 """
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -15,6 +16,8 @@ import numpy as np
 
 from demucs import pretrained
 from demucs.apply import apply_model
+
+logger = logging.getLogger(__name__)
 
 
 class AudioSeparatorService:
@@ -128,7 +131,7 @@ class AudioSeparatorService:
                 # デバッグ用ログ
                 file_size = track_path.stat().st_size / 1024 / 1024
                 duration = track_audio.shape[0] / sr
-                print(f"[DEBUG] Saved {name} track: {track_path} ({file_size:.2f}MB, {duration:.1f}s)")
+                logger.debug(f"[DEBUG] Saved {name} track: {track_path} ({file_size:.2f}MB, {duration:.1f}s)")
 
             return {
                 "success": True,

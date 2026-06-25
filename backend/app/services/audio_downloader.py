@@ -11,9 +11,62 @@ import uuid
 from pathlib import Path
 from typing import Optional, Generator
 
+# ダウンロードのタイムアウト（秒）
+DOWNLOAD_TIMEOUT_SEC = 300  # 5分タイムアウト
+
 
 class AudioDownloaderService:
     """yt-dlp を使用した音声ダウンローダー"""
+
+    def _build_ytdlp_argv(
+        self, url: str, output_template: str, with_progress: bool = False
+    ) -> list[str]:
+        """
+        yt-dlp の引数リストを組み立てる
+
+        Args:
+            url: YouTube動画のURL
+            output_template: -o に渡す出力パス（テンプレート）
+            with_progress: 進捗出力用フラグを付けるか
+                           True: --newline / --progress-template を付与
+                           False: --quiet を付与
+
+        Returns:
+            subprocess に渡す引数リスト
+        """
+        argv = [
+            "yt-dlp",
+            "--js-runtimes", "nodejs",  # Node.jsをJSランタイムとして使用
+            "-x",  # 音声のみ抽出
+            "--audio-format", "wav",
+            "-o", output_template,
+            "--no-playlist",  # プレイリストは無視
+        ]
+        if with_progress:
+            argv += [
+                "--newline",  # 進捗を行ごとに出力
+                "--progress-template", "%(progress._percent_str)s",
+            ]
+        else:
+            argv += ["--quiet"]
+        argv.append(url)
+        return argv
+
+    def _resolve_downloaded_file(self, file_id: str) -> Optional[Path]:
+        """
+        ダウンロードされたファイルを解決する（拡張子の自動付与に対応）
+
+        Args:
+            file_id: ファイル名のID部分
+
+        Returns:
+            見つかったファイルパス。なければ None
+        """
+        # yt-dlpは拡張子を自動で付けることがあるので確認
+        possible_paths = list(self.temp_dir.glob(f"{file_id}.*"))
+        if possible_paths:
+            return possible_paths[0]
+        return None
 
     def __init__(self):
         # 共有ディレクトリを環境変数から優先取得
@@ -46,19 +99,10 @@ class AudioDownloaderService:
         try:
             # yt-dlpコマンドを実行
             result = subprocess.run(
-                [
-                    "yt-dlp",
-                    "--js-runtimes", "nodejs",  # Node.jsをJSランタイムとして使用
-                    "-x",  # 音声のみ抽出
-                    "--audio-format", "wav",
-                    "-o", str(output_path),
-                    "--no-playlist",  # プレイリストは無視
-                    "--quiet",
-                    url,
-                ],
+                self._build_ytdlp_argv(url, str(output_path)),
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5分タイムアウト
+                timeout=DOWNLOAD_TIMEOUT_SEC,
             )
 
             if result.returncode != 0:
@@ -70,10 +114,9 @@ class AudioDownloaderService:
 
             # ファイルが存在するか確認
             if not output_path.exists():
-                # yt-dlpは拡張子を自動で付けることがあるので確認
-                possible_paths = list(self.temp_dir.glob(f"{file_id}.*"))
-                if possible_paths:
-                    output_path = possible_paths[0]
+                resolved = self._resolve_downloaded_file(file_id)
+                if resolved is not None:
+                    output_path = resolved
                 else:
                     return {
                         "success": False,
@@ -127,17 +170,7 @@ class AudioDownloaderService:
 
         try:
             process = subprocess.Popen(
-                [
-                    "yt-dlp",
-                    "--js-runtimes", "nodejs",  # Node.jsをJSランタイムとして使用
-                    "-x",
-                    "--audio-format", "wav",
-                    "-o", output_template,
-                    "--no-playlist",
-                    "--newline",  # 進捗を行ごとに出力
-                    "--progress-template", "%(progress._percent_str)s",
-                    url,
-                ],
+                self._build_ytdlp_argv(url, output_template, with_progress=True),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -187,9 +220,9 @@ class AudioDownloaderService:
 
             # ファイルを探す
             if not output_path.exists():
-                possible_paths = list(self.temp_dir.glob(f"{file_id}.*"))
-                if possible_paths:
-                    output_path = possible_paths[0]
+                resolved = self._resolve_downloaded_file(file_id)
+                if resolved is not None:
+                    output_path = resolved
                 else:
                     yield {
                         "stage": "error",
