@@ -46,14 +46,15 @@ class TestAudioSeparatorService:
             assert result["success"] is False
             assert "not found" in result["error"].lower()
 
-    @patch("app.services.audio_separator.torchaudio")
+    @patch("app.services.audio_separator.sf")
     @patch("app.services.audio_separator.apply_model")
     @patch("app.services.audio_separator.pretrained")
     @patch("app.services.audio_separator.torch")
-    def test_separate_success(self, mock_torch, mock_pretrained, mock_apply, mock_torchaudio):
+    def test_separate_success(self, mock_torch, mock_pretrained, mock_apply, mock_sf):
         """楽器分離が成功"""
         import tempfile
         import os
+        import numpy as np
 
         # テンポラリファイルを作成
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -63,22 +64,30 @@ class TestAudioSeparatorService:
         try:
             mock_torch.backends.mps.is_available.return_value = False
             mock_torch.cuda.is_available.return_value = False
+            mock_torch.no_grad.return_value.__enter__ = lambda self: None
+            mock_torch.no_grad.return_value.__exit__ = lambda self, *args: False
+            # wav 生成用に torch.from_numpy をモック（後段の処理は wav に依存しない）
+            mock_wav = MagicMock()
+            mock_wav.shape = [2, 44100]
+            mock_wav.unsqueeze.return_value = mock_wav
+            mock_wav.to.return_value = mock_wav
+            mock_torch.from_numpy.return_value = mock_wav
 
             # モデルのモック
             mock_model = MagicMock()
             mock_model.sources = ["drums", "bass", "other", "vocals"]
             mock_pretrained.get_model.return_value = mock_model
 
-            # 音声読み込みのモック
-            mock_wav = MagicMock()
-            mock_wav.shape = [2, 44100]
-            mock_wav.unsqueeze.return_value = mock_wav
-            mock_wav.to.return_value = mock_wav
-            mock_torchaudio.load.return_value = (mock_wav, 44100)
+            # 音声読み込みのモック（soundfile.read を使用）
+            # [samples, channels] のステレオ配列を返す
+            audio_data = np.zeros((44100, 2), dtype=np.float32)
+            mock_sf.read.return_value = (audio_data, 44100)
 
-            # 分離結果のモック
+            # 分離結果のモック sources[0, i].cpu().numpy() を満たす
             mock_sources = MagicMock()
-            mock_sources.__getitem__ = lambda self, idx: MagicMock()
+            mock_track = MagicMock()
+            mock_track.cpu.return_value.numpy.return_value = np.zeros((2, 44100), dtype=np.float32)
+            mock_sources.__getitem__ = lambda self, idx: mock_track
             mock_apply.return_value = mock_sources
 
             from app.services.audio_separator import AudioSeparatorService

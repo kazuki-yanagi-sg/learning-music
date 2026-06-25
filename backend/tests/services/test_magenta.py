@@ -96,9 +96,9 @@ class TestMagentaService:
         assert result["success"] is False
         assert "not found" in result["error"].lower()
 
-    @patch("app.services.magenta.get_gemini_service")
-    def test_audio_to_midi_success(self, mock_get_gemini):
-        """Gemini APIで音声解析が成功"""
+    @patch("app.services.magenta.get_basic_pitch_service")
+    def test_audio_to_midi_success(self, mock_get_basic_pitch):
+        """Basic Pitchで音声解析が成功"""
         from app.services.magenta import MagentaService
         import tempfile
         import os
@@ -109,9 +109,9 @@ class TestMagentaService:
             f.write(b"dummy audio data")
 
         try:
-            # Geminiのモックをセットアップ
-            mock_gemini = Mock()
-            mock_gemini.transcribe_audio.return_value = {
+            # Basic Pitchのモックをセットアップ
+            mock_basic_pitch = Mock()
+            mock_basic_pitch.transcribe_audio.return_value = {
                 "success": True,
                 "tempo": 120,
                 "notes": [
@@ -120,7 +120,7 @@ class TestMagentaService:
                 ],
                 "error": None,
             }
-            mock_get_gemini.return_value = mock_gemini
+            mock_get_basic_pitch.return_value = mock_basic_pitch
 
             service = MagentaService()
             result = service.audio_to_midi(temp_path)
@@ -132,9 +132,9 @@ class TestMagentaService:
         finally:
             os.unlink(temp_path)
 
-    @patch("app.services.magenta.get_gemini_service")
-    def test_audio_to_midi_gemini_error(self, mock_get_gemini):
-        """Gemini APIがエラーを返す場合"""
+    @patch("app.services.magenta.get_basic_pitch_service")
+    def test_audio_to_midi_gemini_error(self, mock_get_basic_pitch):
+        """Basic Pitchがエラーを返す場合"""
         from app.services.magenta import MagentaService
         import tempfile
         import os
@@ -144,20 +144,20 @@ class TestMagentaService:
             f.write(b"dummy audio data")
 
         try:
-            mock_gemini = Mock()
-            mock_gemini.transcribe_audio.return_value = {
+            mock_basic_pitch = Mock()
+            mock_basic_pitch.transcribe_audio.return_value = {
                 "success": False,
                 "tempo": None,
                 "notes": [],
-                "error": "Gemini API error",
+                "error": "Basic Pitch API error",
             }
-            mock_get_gemini.return_value = mock_gemini
+            mock_get_basic_pitch.return_value = mock_basic_pitch
 
             service = MagentaService()
             result = service.audio_to_midi(temp_path)
 
             assert result["success"] is False
-            assert "Gemini API error" in result["error"]
+            assert "Basic Pitch API error" in result["error"]
         finally:
             os.unlink(temp_path)
 
