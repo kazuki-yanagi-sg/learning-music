@@ -8,31 +8,13 @@
 import * as Tone from 'tone'
 import Soundfont, { Player as SoundfontPlayer } from 'soundfont-player'
 import { Track, TrackType, Note } from '../types/music'
+// ドラムの再生用MIDIマッピングとサンプルURL（単一モジュールへ集約済み）
+import { DRUM_MAP, DRUM_SAMPLE_URLS } from '../constants/drumKit'
 
-// ドラムキットのマッピング（MIDIノート → 楽器）
-const DRUM_MAP: Record<number, 'kick' | 'snare' | 'hihat' | 'hihatOpen' | 'tom' | 'crash' | 'ride'> = {
-  36: 'kick',       // キック
-  38: 'snare',      // スネア
-  42: 'hihat',      // ハイハット(クローズ)
-  46: 'hihatOpen',  // ハイハット(オープン)
-  45: 'tom',        // ロータム
-  47: 'tom',        // ミドルタム
-  48: 'tom',        // ハイタム
-  49: 'crash',      // クラッシュ
-  51: 'ride',       // ライド
-}
-
-// ドラムサンプルURL（無料のドラムキット）
-const DRUM_SAMPLES_BASE = 'https://tonejs.github.io/audio/drum-samples/breakbeat13/'
-const DRUM_SAMPLE_URLS: Record<string, string> = {
-  kick: DRUM_SAMPLES_BASE + 'kick.mp3',
-  snare: DRUM_SAMPLES_BASE + 'snare.mp3',
-  hihat: DRUM_SAMPLES_BASE + 'hihat.mp3',
-  hihatOpen: DRUM_SAMPLES_BASE + 'hihat-open.mp3',
-  tom: DRUM_SAMPLES_BASE + 'tom1.mp3',
-  crash: DRUM_SAMPLES_BASE + 'crash.mp3',
-  ride: DRUM_SAMPLES_BASE + 'ride.mp3',
-}
+// triggerAttackRelease に渡しうる引数の型（音名/周波数=string|number、末尾 time=number、省略=undefined）
+type TriggerArg = string | number | undefined
+// Tone.js の各シンセが共通で持つ triggerAttackRelease を抽象化した最小インターフェース
+type TriggerSynth = { triggerAttackRelease: (...args: TriggerArg[]) => void }
 
 class AudioEngine {
   private isInitialized = false
@@ -271,6 +253,81 @@ class AudioEngine {
   }
 
   /**
+   * 旋律系トラック（bass/keyboard/guitar）の1音を再生する共通ヘルパー。
+   *
+   * 即時再生（time なし）とスケジュール再生（time あり）の両方を一本化する。
+   * - SoundFont が使える場合: sfXxx.play(note, time, { duration })
+   *   ※ time=undefined のときは即時版と同じく第2引数が undefined になる。
+   * - フォールバック（シンセ）の場合: synth.triggerAttackRelease(...)
+   *   ※ bass/guitar は freq、keyboard は note を渡す（現状の使い分けを厳密に維持）。
+   *   ※ time が undefined のときは末尾 time を付けず2引数で呼ぶ（即時版と完全一致）。
+   *
+   * @param trackType 旋律系トラック種別
+   * @param freq      MIDI から変換した周波数（bass/guitar 用）
+   * @param note      MIDI から変換した音名（soundfont / keyboard 用）
+   * @param duration  発音長（秒）
+   * @param time      スケジュール時刻（即時再生では undefined）
+   */
+  private playInstrument(
+    trackType: 'bass' | 'keyboard' | 'guitar',
+    freq: number,
+    note: string,
+    duration: number,
+    time?: number
+  ): void {
+    // 楽器ごとの「SoundFontプレイヤー」と「フォールバックシンセ + シンセに渡す値」を引く
+    const sf = this.instrumentSoundfont(trackType)
+    if (this.soundfontsLoaded && sf) {
+      sf.play(note, time, { duration })
+      return
+    }
+
+    const { synth, value } = this.instrumentSynth(trackType, freq, note)
+    if (!synth) return
+    // 即時版（time なし）は2引数、スケジュール版（time あり）は3引数で呼ぶ
+    if (time === undefined) {
+      synth.triggerAttackRelease(value, duration)
+    } else {
+      synth.triggerAttackRelease(value, duration, time)
+    }
+  }
+
+  /**
+   * 旋律系トラックに対応する SoundFont プレイヤーを返す。
+   */
+  private instrumentSoundfont(
+    trackType: 'bass' | 'keyboard' | 'guitar'
+  ): SoundfontPlayer | null {
+    switch (trackType) {
+      case 'bass':
+        return this.sfBass
+      case 'keyboard':
+        return this.sfPiano
+      case 'guitar':
+        return this.sfGuitar
+    }
+  }
+
+  /**
+   * 旋律系トラックに対応するフォールバックシンセと、それに渡す値（freq か note）を返す。
+   * bass/guitar は freq、keyboard は note を使う（現状の使い分けを厳密に維持）。
+   */
+  private instrumentSynth(
+    trackType: 'bass' | 'keyboard' | 'guitar',
+    freq: number,
+    note: string
+  ): { synth: TriggerSynth | null; value: number | string } {
+    switch (trackType) {
+      case 'bass':
+        return { synth: this.bass as TriggerSynth | null, value: freq }
+      case 'keyboard':
+        return { synth: this.keyboard as TriggerSynth | null, value: note }
+      case 'guitar':
+        return { synth: this.guitar as TriggerSynth | null, value: freq }
+    }
+  }
+
+  /**
    * 単一のノートを再生（プレビュー用）
    */
   playNote(trackType: TrackType, pitch: number, duration: number = 0.5): void {
@@ -279,71 +336,86 @@ class AudioEngine {
     const freq = this.midiToFreq(pitch)
     const note = this.midiToNote(pitch)
 
-    switch (trackType) {
-      case 'drum':
-        this.playDrumSound(pitch)
-        break
-      case 'bass':
-        if (this.soundfontsLoaded && this.sfBass) {
-          this.sfBass.play(note, undefined, { duration })
-        } else {
-          this.bass?.triggerAttackRelease(freq, duration)
-        }
-        break
-      case 'keyboard':
-        if (this.soundfontsLoaded && this.sfPiano) {
-          this.sfPiano.play(note, undefined, { duration })
-        } else {
-          this.keyboard?.triggerAttackRelease(note, duration)
-        }
-        break
-      case 'guitar':
-        if (this.soundfontsLoaded && this.sfGuitar) {
-          this.sfGuitar.play(note, undefined, { duration })
-        } else {
-          this.guitar?.triggerAttackRelease(freq, duration)
-        }
-        break
+    if (trackType === 'drum') {
+      this.playDrumSound(pitch)
+      return
     }
+    // bass/keyboard/guitar は共通ヘルパーで即時再生（time なし）
+    this.playInstrument(trackType, freq, note, duration)
   }
 
   /**
-   * ドラム音を再生
+   * ドラム音を再生する共通ヘルパー。
+   *
+   * 即時再生（time なし）とスケジュール再生（time あり）を一本化する。
+   * triggerAttackRelease の末尾 time を有無で出し分ける。
+   *
+   * @param pitch MIDI ノート番号
+   * @param time  スケジュール時刻（即時再生では undefined）
    */
-  private playDrumSound(pitch: number): void {
+  private playDrumSound(pitch: number, time?: number): void {
     const drumType = DRUM_MAP[pitch] || 'kick'
 
     // サンプラーが読み込まれていればサンプル音を使用
     if (this.drumSamplesLoaded && this.drumSampler) {
       // ドラム種別をサンプラーのノートに変換
       const sampleNote = this.drumTypeToSampleNote(drumType)
-      this.drumSampler.triggerAttackRelease(sampleNote, '8n')
+      this.triggerWithOptionalTime(this.drumSampler as unknown as TriggerSynth, sampleNote, '8n', time)
       return
     }
 
-    // フォールバック: シンセ音
+    // フォールバック: シンセ音（楽器・音名・音価の対応表を引いて発音）
+    const fb = this.drumFallback(drumType)
+    if (!fb || !fb.synth) return
+    if (fb.note === undefined) {
+      // snare は音名なしで triggerAttackRelease(duration[, time])
+      this.triggerWithOptionalTime(fb.synth, fb.dur, time)
+    } else {
+      this.triggerWithOptionalTime(fb.synth, fb.note, fb.dur, time)
+    }
+  }
+
+  /**
+   * triggerAttackRelease を「末尾 time の有無」で出し分ける小ヘルパー。
+   * time が undefined のときは time 引数を付けない（即時版と完全一致）。
+   */
+  private triggerWithOptionalTime(
+    synth: TriggerSynth,
+    ...args: TriggerArg[]
+  ): void {
+    const time = args[args.length - 1]
+    const head = args.slice(0, -1)
+    if (time === undefined) {
+      synth.triggerAttackRelease(...head)
+    } else {
+      synth.triggerAttackRelease(...head, time)
+    }
+  }
+
+  /**
+   * フォールバックシンセのドラム発音定義を返す。
+   * note=undefined のシンセ（snare）は音名なしで発音する。
+   */
+  private drumFallback(
+    drumType: string
+  ): { synth: TriggerSynth | null; note?: string; dur: string } | null {
     switch (drumType) {
       case 'kick':
-        this.kick?.triggerAttackRelease('C1', '8n')
-        break
+        return { synth: this.kick as TriggerSynth | null, note: 'C1', dur: '8n' }
       case 'snare':
-        this.snare?.triggerAttackRelease('8n')
-        break
+        return { synth: this.snare as TriggerSynth | null, note: undefined, dur: '8n' }
       case 'hihat':
-        this.hihat?.triggerAttackRelease('C4', '32n')
-        break
+        return { synth: this.hihat as TriggerSynth | null, note: 'C4', dur: '32n' }
       case 'hihatOpen':
-        this.hihat?.triggerAttackRelease('C4', '16n')
-        break
+        return { synth: this.hihat as TriggerSynth | null, note: 'C4', dur: '16n' }
       case 'tom':
-        this.tom?.triggerAttackRelease('G2', '8n')
-        break
+        return { synth: this.tom as TriggerSynth | null, note: 'G2', dur: '8n' }
       case 'crash':
-        this.crash?.triggerAttackRelease('C4', '4n')
-        break
+        return { synth: this.crash as TriggerSynth | null, note: 'C4', dur: '4n' }
       case 'ride':
-        this.ride?.triggerAttackRelease('C4', '8n')
-        break
+        return { synth: this.ride as TriggerSynth | null, note: 'C4', dur: '8n' }
+      default:
+        return null
     }
   }
 
@@ -403,71 +475,20 @@ class AudioEngine {
     const noteName = this.midiToNote(note.pitch)
     const duration = note.duration * (60 / this.bpm)
 
-    switch (trackType) {
-      case 'drum':
-        this.triggerDrumNote(note.pitch, time)
-        break
-      case 'bass':
-        if (this.soundfontsLoaded && this.sfBass) {
-          this.sfBass.play(noteName, time, { duration })
-        } else {
-          this.bass?.triggerAttackRelease(freq, duration, time)
-        }
-        break
-      case 'keyboard':
-        if (this.soundfontsLoaded && this.sfPiano) {
-          this.sfPiano.play(noteName, time, { duration })
-        } else {
-          this.keyboard?.triggerAttackRelease(noteName, duration, time)
-        }
-        break
-      case 'guitar':
-        if (this.soundfontsLoaded && this.sfGuitar) {
-          this.sfGuitar.play(noteName, time, { duration })
-        } else {
-          this.guitar?.triggerAttackRelease(freq, duration, time)
-        }
-        break
+    if (trackType === 'drum') {
+      this.triggerDrumNote(note.pitch, time)
+      return
     }
+    // bass/keyboard/guitar は共通ヘルパーでスケジュール再生（time あり）
+    this.playInstrument(trackType, freq, noteName, duration, time)
   }
 
   /**
-   * ドラムノートをトリガー（スケジュール再生用）
+   * ドラムノートをトリガー（スケジュール再生用）。
+   * 実体は playDrumSound と共通。time を渡すだけ。
    */
   private triggerDrumNote(pitch: number, time: number): void {
-    const drumType = DRUM_MAP[pitch] || 'kick'
-
-    // サンプラーが読み込まれていればサンプル音を使用
-    if (this.drumSamplesLoaded && this.drumSampler) {
-      const sampleNote = this.drumTypeToSampleNote(drumType)
-      this.drumSampler.triggerAttackRelease(sampleNote, '8n', time)
-      return
-    }
-
-    // フォールバック: シンセ音
-    switch (drumType) {
-      case 'kick':
-        this.kick?.triggerAttackRelease('C1', '8n', time)
-        break
-      case 'snare':
-        this.snare?.triggerAttackRelease('8n', time)
-        break
-      case 'hihat':
-        this.hihat?.triggerAttackRelease('C4', '32n', time)
-        break
-      case 'hihatOpen':
-        this.hihat?.triggerAttackRelease('C4', '16n', time)
-        break
-      case 'tom':
-        this.tom?.triggerAttackRelease('G2', '8n', time)
-        break
-      case 'crash':
-        this.crash?.triggerAttackRelease('C4', '4n', time)
-        break
-      case 'ride':
-        this.ride?.triggerAttackRelease('C4', '8n', time)
-        break
-    }
+    this.playDrumSound(pitch, time)
   }
 
   /**
@@ -540,19 +561,13 @@ class AudioEngine {
             this.triggerDrumNote(note.pitch, time)
             break
           case 'bass':
-            if (this.soundfontsLoaded && this.sfBass) {
-              this.sfBass.play(noteName, time, { duration })
-            } else {
-              this.bass?.triggerAttackRelease(freq, duration, time)
-            }
+            // sfBass / bass(freq) → 'bass' の対応と完全一致
+            this.playInstrument('bass', freq, noteName, duration, time)
             break
           case 'other':
           case 'default':
-            if (this.soundfontsLoaded && this.sfPiano) {
-              this.sfPiano.play(noteName, time, { duration })
-            } else {
-              this.keyboard?.triggerAttackRelease(noteName, duration, time)
-            }
+            // sfPiano / keyboard(note) → 'keyboard' の対応と完全一致
+            this.playInstrument('keyboard', freq, noteName, duration, time)
             break
         }
       }, startTime)
@@ -645,14 +660,13 @@ class AudioEngine {
               this.triggerDrumNote(note.pitch, time)
               break
             case 'bass':
-              if (this.soundfontsLoaded && this.sfBass) {
-                this.sfBass.play(noteName, time, { duration })
-              } else {
-                this.bass?.triggerAttackRelease(freq, duration, time)
-              }
+              // sfBass / bass(freq) → 'bass' の対応と完全一致
+              this.playInstrument('bass', freq, noteName, duration, time)
               break
             case 'other':
-              // other（ギター/キーボード）はギター音源で再生
+              // other（ギター/キーボード）はギター音源で再生（sfGuitar）、
+              // フォールバックは keyboard(note)。これは playInstrument のどの
+              // トラック対応とも一致しない独自の組み合わせのため、ここに残す。
               if (this.soundfontsLoaded && this.sfGuitar) {
                 this.sfGuitar.play(noteName, time, { duration })
               } else {
@@ -660,12 +674,8 @@ class AudioEngine {
               }
               break
             case 'melody':
-              // メロディはピアノ音源で再生
-              if (this.soundfontsLoaded && this.sfPiano) {
-                this.sfPiano.play(noteName, time, { duration })
-              } else {
-                this.keyboard?.triggerAttackRelease(noteName, duration, time)
-              }
+              // メロディはピアノ音源で再生。sfPiano / keyboard(note) → 'keyboard' と完全一致
+              this.playInstrument('keyboard', freq, noteName, duration, time)
               break
           }
         }, adjustedStart)
