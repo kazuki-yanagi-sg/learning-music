@@ -6,9 +6,14 @@ Spotify's Basic Pitch を使用した高精度オーディオ→MIDI変換
 + 信頼度フィルタリング
 + ビートクオンタイズ
 """
+import logging
 from pathlib import Path
 from typing import Optional
 import numpy as np
+
+from app.models import TranscriptionResult
+
+logger = logging.getLogger(__name__)
 
 # basic-pitch / librosa / scipy は import が重く、純粋ロジック（quantize_time /
 # merge_notes / _normalize_drum_pitch 等）のテストには不要なため遅延 import する。
@@ -33,7 +38,7 @@ def _ensure_basic_pitch() -> None:
         from basic_pitch import ICASSP_2022_MODEL_PATH as _model_path
         predict = _predict
         ICASSP_2022_MODEL_PATH = _model_path
-        print(f"[BasicPitch] Model path: {ICASSP_2022_MODEL_PATH}")
+        logger.info(f"[BasicPitch] Model path: {ICASSP_2022_MODEL_PATH}")
 
 
 def _ensure_librosa() -> None:
@@ -81,7 +86,7 @@ class BasicPitchService:
                 tempo = float(tempo[0]) if len(tempo) > 0 else 120.0
             return float(tempo), beat_times
         except Exception as e:
-            print(f"[BasicPitch] Tempo detection failed: {e}")
+            logger.warning(f"[BasicPitch] Tempo detection failed: {e}")
             return 120.0, np.array([])
 
     def quantize_time(self, time: float, tempo: float, resolution: float = 0.5) -> float:
@@ -194,7 +199,7 @@ class BasicPitchService:
         try:
             # 1. テンポ検出（librosa）
             tempo, beat_times = self.detect_tempo(str(audio_file))
-            print(f"[BasicPitch] Detected tempo: {tempo:.1f} BPM")
+            logger.info(f"[BasicPitch] Detected tempo: {tempo:.1f} BPM")
 
             # 2. Basic Pitch で推論
             self._ensure_model()
@@ -243,7 +248,7 @@ class BasicPitchService:
             original_count = len(notes)
             notes = self.merge_notes(notes, gap_threshold=self.merge_gap_threshold)
 
-            print(f"[BasicPitch] Transcribed {len(notes)} notes (filtered {filtered_count}, merged {original_count - len(notes)})")
+            logger.info(f"[BasicPitch] Transcribed {len(notes)} notes (filtered {filtered_count}, merged {original_count - len(notes)})")
 
             return {
                 "success": True,
@@ -253,7 +258,7 @@ class BasicPitchService:
             }
 
         except Exception as e:
-            print(f"[BasicPitch] Error: {type(e).__name__}: {str(e)}")
+            logger.error(f"[BasicPitch] Error: {type(e).__name__}: {str(e)}")
             return {
                 "success": False,
                 "tempo": None,
@@ -282,21 +287,22 @@ class BasicPitchService:
 
         audio_file = Path(audio_path)
         if not audio_file.exists():
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": f"Audio file not found: {audio_path}",
-            }
+            # 戻り値の契約は TranscriptionResult で型保証する（consumer は dict のまま）
+            return TranscriptionResult(
+                success=False,
+                tempo=None,
+                notes=[],
+                error=f"Audio file not found: {audio_path}",
+            ).to_dict()
 
         file_size = audio_file.stat().st_size
         if file_size == 0:
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": f"Audio file is empty: {track_type}",
-            }
+            return TranscriptionResult(
+                success=False,
+                tempo=None,
+                notes=[],
+                error=f"Audio file is empty: {track_type}",
+            ).to_dict()
 
         try:
             # テンポが未検出なら検出
@@ -363,25 +369,25 @@ class BasicPitchService:
             if track_type != "drums":
                 original_count = len(notes)
                 notes = self.merge_notes(notes, gap_threshold=self.merge_gap_threshold)
-                print(f"[BasicPitch] {track_type}: {len(notes)} notes (filtered {filtered_count}, merged {original_count - len(notes)})")
+                logger.info(f"[BasicPitch] {track_type}: {len(notes)} notes (filtered {filtered_count}, merged {original_count - len(notes)})")
             else:
-                print(f"[BasicPitch] {track_type}: {len(notes)} notes (filtered {filtered_count})")
+                logger.info(f"[BasicPitch] {track_type}: {len(notes)} notes (filtered {filtered_count})")
 
-            return {
-                "success": True,
-                "tempo": round(tempo) if tempo else None,
-                "notes": notes,
-                "error": None,
-            }
+            return TranscriptionResult(
+                success=True,
+                tempo=round(tempo) if tempo else None,
+                notes=notes,
+                error=None,
+            ).to_dict()
 
         except Exception as e:
-            print(f"[BasicPitch] {track_type} Error: {type(e).__name__}: {str(e)}")
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": f"Track transcription failed: {str(e)}",
-            }
+            logger.error(f"[BasicPitch] {track_type} Error: {type(e).__name__}: {str(e)}")
+            return TranscriptionResult(
+                success=False,
+                tempo=None,
+                notes=[],
+                error=f"Track transcription failed: {str(e)}",
+            ).to_dict()
 
     def _get_track_params(self, track_type: str) -> dict:
         """楽器別のパラメータを取得（感度UP調整済み）"""

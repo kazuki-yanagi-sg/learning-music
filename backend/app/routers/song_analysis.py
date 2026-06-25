@@ -5,6 +5,9 @@
 """
 import asyncio
 import json
+import logging
+from contextlib import contextmanager
+from dataclasses import dataclass
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -17,7 +20,77 @@ from app.services import (
     get_gemini_service,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
+
+
+# --- 解析パイプライン共通処理 ---
+#
+# analyze系3ハンドラ（analyze_video / analyze_4tracks / analyze_with_progress）が
+# 共通して持つ「一時ファイルのクリーンアップ」「AI解説生成」を括り出す。
+# 振る舞いは各ハンドラの現状（pass→log済み）と完全に一致させる。
+
+
+@dataclass
+class TempFiles:
+    """解析中に生成される一時ファイルのパスを保持する。
+
+    cleanup_temp_files コンテキストマネージャと組み合わせて使う。
+    body 内で audio_path / midi_path を都度代入し、終了時にまとめて削除する。
+    """
+    audio_path: Optional[str] = None
+    midi_path: Optional[str] = None
+
+
+@contextmanager
+def cleanup_temp_files():
+    """一時ファイルを後始末するコンテキストマネージャ。
+
+    yield した TempFiles に audio_path / midi_path を設定しておくと、
+    ブロック終了時（正常・例外いずれも）にクリーンアップする。
+    後始末なので、失敗してもユーザー応答には影響させず logger.warning のみ残す。
+    （従来の finally + try/except: pass→log と等価）
+    """
+    temp = TempFiles()
+    try:
+        yield temp
+    finally:
+        try:
+            if temp.audio_path:
+                downloader = get_audio_downloader_service()
+                downloader.cleanup(temp.audio_path)
+            if temp.midi_path:
+                magenta = get_magenta_service()
+                magenta.cleanup(temp.midi_path)
+        except Exception as e:
+            logger.warning("一時ファイルのクリーンアップに失敗しました: %s", e)
+
+
+async def generate_ai_analysis_text(
+    video: dict,
+    chord_list: list[dict],
+    tempo: int,
+    notes_count: int,
+) -> str:
+    """Geminiでコード進行のAI解説を生成する。
+
+    失敗時は従来通り「AI解説の生成に失敗しました: ...」の文字列を返す
+    （例外を伝播させない）。各ハンドラの try/except 部分と等価。
+    """
+    try:
+        gemini = get_gemini_service()
+        return await gemini.generate_song_analysis(
+            track_name=video["title"],
+            artist=video["channel"],
+            key="",
+            mode="",
+            tempo=tempo,
+            chords=chord_list,
+            notes_count=notes_count,
+        )
+    except Exception as e:
+        return f"AI解説の生成に失敗しました: {str(e)}"
 
 
 class ChordInfo(BaseModel):
@@ -138,9 +211,6 @@ async def analyze_with_progress(video_id: str, generate_ai_analysis: bool = True
     """
     解析を実行し、進捗をSSEでストリーミング
     """
-    audio_path = None
-    midi_path = None
-
     def send_event(stage: str, progress: int, message: str, data: dict = None):
         event_data = {
             "stage": stage,
@@ -151,155 +221,114 @@ async def analyze_with_progress(video_id: str, generate_ai_analysis: bool = True
             event_data["data"] = data
         return f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
 
-    try:
-        # 1. YouTubeから動画情報を取得
-        yield send_event("init", 0, "動画情報を取得中...")
-        await asyncio.sleep(0)
-
-        youtube = get_youtube_service()
-        video = youtube.get_video(video_id)
-
-        if not video:
-            yield send_event("error", 0, "動画が見つかりません")
-            return
-
-        video_url = video["url"]
-        yield send_event("init", 5, f"「{video['title']}」を解析します")
-        await asyncio.sleep(0)
-
-        # 2. yt-dlpで音声をダウンロード（進捗付き）
-        downloader = get_audio_downloader_service()
-
-        for progress_event in downloader.download_audio_with_progress(video_url):
-            stage = progress_event["stage"]
-            progress = progress_event["progress"]
-            message = progress_event["message"]
-
-            if stage == "error":
-                yield send_event("error", 0, message)
-                return
-            elif stage == "complete":
-                audio_path = progress_event["file_path"]
-                yield send_event("download", 100, "ダウンロード完了")
-                await asyncio.sleep(0)
-            else:
-                # ダウンロード進捗を0-40%にマッピング
-                mapped_progress = int(progress * 0.4)
-                yield send_event("download", mapped_progress, message)
-                await asyncio.sleep(0)
-
-        # 3. Basic Pitchで音声を解析（MIDI変換）
-        yield send_event("convert", 45, "音声を解析中（Basic Pitch）...")
-        await asyncio.sleep(0)
-
-        magenta = get_magenta_service()
-        midi_result = magenta.audio_to_midi(audio_path)
-
-        if not midi_result["success"]:
-            yield send_event("error", 0, f"音声解析エラー: {midi_result['error']}")
-            return
-
-        midi_path = midi_result["midi_path"]
-        notes = midi_result.get("notes", [])
-        tempo = midi_result.get("tempo", 120)
-
-        yield send_event("convert", 70, f"音声解析完了: {len(notes)}ノート検出")
-        await asyncio.sleep(0)
-
-        # 4. コード進行を抽出
-        yield send_event("analyze", 75, "コード進行を抽出中...")
-        await asyncio.sleep(0)
-
-        chords_data = magenta.extract_chords_from_notes(notes)
-        chords = [{"time": c["time"], "chord": c["chord"]} for c in chords_data]
-
-        yield send_event("analyze", 85, f"{len(chords)}個のコードを検出")
-        await asyncio.sleep(0)
-
-        # 5. AI解説生成（オプション）
-        analysis_text = None
-        if generate_ai_analysis and chords:
-            yield send_event("ai", 90, "AI解説を生成中...")
+    with cleanup_temp_files() as temp:
+        try:
+            # 1. YouTubeから動画情報を取得
+            yield send_event("init", 0, "動画情報を取得中...")
             await asyncio.sleep(0)
-            try:
-                gemini = get_gemini_service()
-                chord_list = chords[:20]
-                analysis_text = await gemini.generate_song_analysis(
-                    track_name=video["title"],
-                    artist=video["channel"],
-                    key="",
-                    mode="",
+
+            youtube = get_youtube_service()
+            video = youtube.get_video(video_id)
+
+            if not video:
+                yield send_event("error", 0, "動画が見つかりません")
+                return
+
+            video_url = video["url"]
+            yield send_event("init", 5, f"「{video['title']}」を解析します")
+            await asyncio.sleep(0)
+
+            # 2. yt-dlpで音声をダウンロード（進捗付き）
+            downloader = get_audio_downloader_service()
+
+            for progress_event in downloader.download_audio_with_progress(video_url):
+                stage = progress_event["stage"]
+                progress = progress_event["progress"]
+                message = progress_event["message"]
+
+                if stage == "error":
+                    yield send_event("error", 0, message)
+                    return
+                elif stage == "complete":
+                    temp.audio_path = progress_event["file_path"]
+                    yield send_event("download", 100, "ダウンロード完了")
+                    await asyncio.sleep(0)
+                else:
+                    # ダウンロード進捗を0-40%にマッピング
+                    mapped_progress = int(progress * 0.4)
+                    yield send_event("download", mapped_progress, message)
+                    await asyncio.sleep(0)
+
+            # 3. Basic Pitchで音声を解析（MIDI変換）
+            yield send_event("convert", 45, "音声を解析中（Basic Pitch）...")
+            await asyncio.sleep(0)
+
+            magenta = get_magenta_service()
+            midi_result = magenta.audio_to_midi(temp.audio_path)
+
+            if not midi_result["success"]:
+                yield send_event("error", 0, f"音声解析エラー: {midi_result['error']}")
+                return
+
+            temp.midi_path = midi_result["midi_path"]
+            notes = midi_result.get("notes", [])
+            tempo = midi_result.get("tempo", 120)
+
+            yield send_event("convert", 70, f"音声解析完了: {len(notes)}ノート検出")
+            await asyncio.sleep(0)
+
+            # 4. コード進行を抽出
+            yield send_event("analyze", 75, "コード進行を抽出中...")
+            await asyncio.sleep(0)
+
+            chords_data = magenta.extract_chords_from_notes(notes)
+            chords = [{"time": c["time"], "chord": c["chord"]} for c in chords_data]
+
+            yield send_event("analyze", 85, f"{len(chords)}個のコードを検出")
+            await asyncio.sleep(0)
+
+            # 5. AI解説生成（オプション）
+            analysis_text = None
+            if generate_ai_analysis and chords:
+                yield send_event("ai", 90, "AI解説を生成中...")
+                await asyncio.sleep(0)
+                analysis_text = await generate_ai_analysis_text(
+                    video=video,
+                    chord_list=chords[:20],
                     tempo=tempo,
-                    chords=chord_list,
                     notes_count=len(notes),
                 )
-            except Exception as e:
-                analysis_text = f"AI解説の生成に失敗しました: {str(e)}"
 
-        yield send_event("ai", 95, "AI解説完了")
-        await asyncio.sleep(0)
+            yield send_event("ai", 95, "AI解説完了")
+            await asyncio.sleep(0)
 
-        # 6. 曲の長さを計算
-        duration = max((n.get("end", 0) for n in notes), default=0) if notes else 0
+            # 6. 曲の長さを計算
+            duration = max((n.get("end", 0) for n in notes), default=0) if notes else 0
 
-        # 7. 結果を送信（最初の500ノートのみ）
-        notes_for_response = [
-            {"pitch": n["pitch"], "start": n["start"], "end": n["end"], "velocity": n.get("velocity", 80)}
-            for n in notes[:500]
-        ]
-        result = {
-            "video_id": video_id,
-            "title": video["title"],
-            "channel": video["channel"],
-            "thumbnail": video.get("thumbnail"),
-            "url": video["url"],
-            "tempo": tempo,
-            "duration": round(duration, 2),
-            "notes_count": len(notes),
-            "notes": notes_for_response,
-            "chords": chords[:50],
-            "analysis_text": analysis_text,
-        }
+            # 7. 結果を送信（最初の500ノートのみ）
+            notes_for_response = [
+                {"pitch": n["pitch"], "start": n["start"], "end": n["end"], "velocity": n.get("velocity", 80)}
+                for n in notes[:500]
+            ]
+            result = {
+                "video_id": video_id,
+                "title": video["title"],
+                "channel": video["channel"],
+                "thumbnail": video.get("thumbnail"),
+                "url": video["url"],
+                "tempo": tempo,
+                "duration": round(duration, 2),
+                "notes_count": len(notes),
+                "notes": notes_for_response,
+                "chords": chords[:50],
+                "analysis_text": analysis_text,
+            }
 
-        yield send_event("complete", 100, "解析完了", result)
-        await asyncio.sleep(0)
+            yield send_event("complete", 100, "解析完了", result)
+            await asyncio.sleep(0)
 
-    except Exception as e:
-        yield send_event("error", 0, f"解析エラー: {str(e)}")
-
-    finally:
-        # クリーンアップ
-        try:
-            if audio_path:
-                downloader = get_audio_downloader_service()
-                downloader.cleanup(audio_path)
-            if midi_path:
-                magenta = get_magenta_service()
-                magenta.cleanup(midi_path)
-        except Exception:
-            pass
-
-
-async def simple_sse_test():
-    """シンプルなSSEテスト"""
-    for i in range(5):
-        yield f"data: {{\"count\": {i}}}\n\n"
-        await asyncio.sleep(1)
-    yield "data: {\"done\": true}\n\n"
-
-
-@router.get("/sse-test")
-async def sse_test():
-    """SSEテストエンドポイント"""
-    return StreamingResponse(
-        simple_sse_test(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        }
-    )
+        except Exception as e:
+            yield send_event("error", 0, f"解析エラー: {str(e)}")
 
 
 @router.get("/analyze/{video_id}/stream")
@@ -334,105 +363,84 @@ async def analyze_video(video_id: str, generate_ai_analysis: bool = True):
         video_id: YouTubeの動画ID
         generate_ai_analysis: AI解説を生成するか（デフォルト: True）
     """
-    audio_path = None
-    midi_path = None
+    with cleanup_temp_files() as temp:
+        try:
+            # 1. YouTubeから動画情報を取得
+            youtube = get_youtube_service()
+            video = youtube.get_video(video_id)
 
-    try:
-        # 1. YouTubeから動画情報を取得
-        youtube = get_youtube_service()
-        video = youtube.get_video(video_id)
+            if not video:
+                raise HTTPException(status_code=404, detail="動画が見つかりません")
 
-        if not video:
-            raise HTTPException(status_code=404, detail="動画が見つかりません")
+            video_url = video["url"]
 
-        video_url = video["url"]
+            # 2. yt-dlpで音声をダウンロード
+            downloader = get_audio_downloader_service()
+            download_result = downloader.download_audio(video_url)
 
-        # 2. yt-dlpで音声をダウンロード
-        downloader = get_audio_downloader_service()
-        download_result = downloader.download_audio(video_url)
+            if not download_result["success"]:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"音声ダウンロードエラー: {download_result['error']}"
+                )
 
-        if not download_result["success"]:
-            raise HTTPException(
-                status_code=500,
-                detail=f"音声ダウンロードエラー: {download_result['error']}"
-            )
+            temp.audio_path = download_result["file_path"]
 
-        audio_path = download_result["file_path"]
+            # 3. Basic Pitchで音声を解析
+            magenta = get_magenta_service()
+            midi_result = magenta.audio_to_midi(temp.audio_path)
 
-        # 3. Basic Pitchで音声を解析
-        magenta = get_magenta_service()
-        midi_result = magenta.audio_to_midi(audio_path)
+            if not midi_result["success"]:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"音声解析エラー: {midi_result['error']}"
+                )
 
-        if not midi_result["success"]:
-            raise HTTPException(
-                status_code=500,
-                detail=f"音声解析エラー: {midi_result['error']}"
-            )
+            temp.midi_path = midi_result["midi_path"]
+            notes = midi_result.get("notes", [])
+            tempo = midi_result.get("tempo", 120)
 
-        midi_path = midi_result["midi_path"]
-        notes = midi_result.get("notes", [])
-        tempo = midi_result.get("tempo", 120)
+            # 4. コード進行を抽出
+            chords_data = magenta.extract_chords_from_notes(notes)
+            chords = [ChordInfo(time=c["time"], chord=c["chord"]) for c in chords_data]
 
-        # 4. コード進行を抽出
-        chords_data = magenta.extract_chords_from_notes(notes)
-        chords = [ChordInfo(time=c["time"], chord=c["chord"]) for c in chords_data]
-
-        # 5. AI解説生成（オプション）
-        analysis_text = None
-        if generate_ai_analysis and chords:
-            try:
-                gemini = get_gemini_service()
+            # 5. AI解説生成（オプション）
+            analysis_text = None
+            if generate_ai_analysis and chords:
                 chord_list = [{"chord": c.chord, "time": c.time} for c in chords[:20]]
-                analysis_text = await gemini.generate_song_analysis(
-                    track_name=video["title"],
-                    artist=video["channel"],
-                    key="",
-                    mode="",
+                analysis_text = await generate_ai_analysis_text(
+                    video=video,
+                    chord_list=chord_list,
                     tempo=tempo,
-                    chords=chord_list,
                     notes_count=len(notes),
                 )
-            except Exception as e:
-                analysis_text = f"AI解説の生成に失敗しました: {str(e)}"
 
-        # 曲の長さを計算
-        duration = max((n.get("end", 0) for n in notes), default=0) if notes else 0
+            # 曲の長さを計算
+            duration = max((n.get("end", 0) for n in notes), default=0) if notes else 0
 
-        # 結果を返す
-        result = AnalysisResult(
-            video_id=video_id,
-            title=video["title"],
-            channel=video["channel"],
-            thumbnail=video.get("thumbnail"),
-            url=video["url"],
-            tempo=tempo,
-            duration=round(duration, 2),
-            notes_count=len(notes),
-            chords=chords[:50],
-            analysis_text=analysis_text,
-        )
+            # 結果を返す
+            result = AnalysisResult(
+                video_id=video_id,
+                title=video["title"],
+                channel=video["channel"],
+                thumbnail=video.get("thumbnail"),
+                url=video["url"],
+                tempo=tempo,
+                duration=round(duration, 2),
+                notes_count=len(notes),
+                chords=chords[:50],
+                analysis_text=analysis_text,
+            )
 
-        return {
-            "success": True,
-            "data": result,
-        }
+            return {
+                "success": True,
+                "data": result,
+            }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"解析エラー: {str(e)}")
-
-    finally:
-        # 一時ファイルをクリーンアップ
-        try:
-            if audio_path:
-                downloader = get_audio_downloader_service()
-                downloader.cleanup(audio_path)
-            if midi_path:
-                magenta = get_magenta_service()
-                magenta.cleanup(midi_path)
-        except Exception:
-            pass
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"解析エラー: {str(e)}")
 
 
 class TrackNotes(BaseModel):
@@ -468,107 +476,91 @@ async def analyze_4tracks(video_id: str):
     Returns:
         4トラック（drums, bass, other, vocals）のノート情報とコード解説
     """
-    audio_path = None
+    # 4トラック解析は MIDI ファイルの後始末を行わない（従来通り audio_path のみ）。
+    with cleanup_temp_files() as temp:
+        try:
+            # 1. YouTubeから動画情報を取得
+            youtube = get_youtube_service()
+            video = youtube.get_video(video_id)
 
-    try:
-        # 1. YouTubeから動画情報を取得
-        youtube = get_youtube_service()
-        video = youtube.get_video(video_id)
+            if not video:
+                raise HTTPException(status_code=404, detail="動画が見つかりません")
 
-        if not video:
-            raise HTTPException(status_code=404, detail="動画が見つかりません")
+            video_url = video["url"]
 
-        video_url = video["url"]
+            # 2. yt-dlpで音声をダウンロード
+            downloader = get_audio_downloader_service()
+            download_result = downloader.download_audio(video_url)
 
-        # 2. yt-dlpで音声をダウンロード
-        downloader = get_audio_downloader_service()
-        download_result = downloader.download_audio(video_url)
+            if not download_result["success"]:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"音声ダウンロードエラー: {download_result['error']}"
+                )
 
-        if not download_result["success"]:
-            raise HTTPException(
-                status_code=500,
-                detail=f"音声ダウンロードエラー: {download_result['error']}"
-            )
+            temp.audio_path = download_result["file_path"]
 
-        audio_path = download_result["file_path"]
+            # 3. 4トラック分離 → MIDI変換
+            magenta = get_magenta_service()
+            result = magenta.audio_to_4tracks(temp.audio_path)
 
-        # 3. 4トラック分離 → MIDI変換
-        magenta = get_magenta_service()
-        result = magenta.audio_to_4tracks(audio_path)
+            if not result["success"]:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"4トラック変換エラー: {result['error']}"
+                )
 
-        if not result["success"]:
-            raise HTTPException(
-                status_code=500,
-                detail=f"4トラック変換エラー: {result['error']}"
-            )
+            tracks = result["tracks"]
+            tempo = result["tempo"]
 
-        tracks = result["tracks"]
-        tempo = result["tempo"]
+            # 4. コード進行を抽出（ベース + other から）
+            all_notes = []
+            for track_type in ["bass", "other"]:
+                if track_type in tracks and tracks[track_type].get("notes"):
+                    all_notes.extend(tracks[track_type]["notes"])
 
-        # 4. コード進行を抽出（ベース + other から）
-        all_notes = []
-        for track_type in ["bass", "other"]:
-            if track_type in tracks and tracks[track_type].get("notes"):
-                all_notes.extend(tracks[track_type]["notes"])
+            chords_data = magenta.extract_chords_from_notes(all_notes)
+            chords = [ChordInfo(time=c["time"], chord=c["chord"]) for c in chords_data]
 
-        chords_data = magenta.extract_chords_from_notes(all_notes)
-        chords = [ChordInfo(time=c["time"], chord=c["chord"]) for c in chords_data]
-
-        # 5. AI解説生成（コード進行の解説）
-        analysis_text = None
-        if chords:
-            try:
-                gemini = get_gemini_service()
+            # 5. AI解説生成（コード進行の解説）
+            analysis_text = None
+            if chords:
                 chord_list = [{"chord": c.chord, "time": c.time} for c in chords[:20]]
-                analysis_text = await gemini.generate_song_analysis(
-                    track_name=video["title"],
-                    artist=video["channel"],
-                    key="",
-                    mode="",
+                analysis_text = await generate_ai_analysis_text(
+                    video=video,
+                    chord_list=chord_list,
                     tempo=tempo,
-                    chords=chord_list,
                     notes_count=len(all_notes),
                 )
-            except Exception as e:
-                analysis_text = f"AI解説の生成に失敗しました: {str(e)}"
 
-        # 結果を返す
-        track_results = {}
-        for track_type, track_data in tracks.items():
-            track_results[track_type] = TrackNotes(
-                notes=track_data.get("notes", []),
-                midi_path=track_data.get("midi_path"),
-                error=track_data.get("error"),
-            )
+            # 結果を返す
+            track_results = {}
+            for track_type, track_data in tracks.items():
+                track_results[track_type] = TrackNotes(
+                    notes=track_data.get("notes", []),
+                    midi_path=track_data.get("midi_path"),
+                    error=track_data.get("error"),
+                )
 
-        return {
-            "success": True,
-            "data": FourTrackResult(
-                video_id=video_id,
-                title=video["title"],
-                channel=video["channel"],
-                thumbnail=video.get("thumbnail"),
-                url=video["url"],
-                tempo=tempo,
-                tracks=track_results,
-                chords=chords[:50],
-                analysis_text=analysis_text,
-            ),
-        }
+            return {
+                "success": True,
+                "data": FourTrackResult(
+                    video_id=video_id,
+                    title=video["title"],
+                    channel=video["channel"],
+                    thumbnail=video.get("thumbnail"),
+                    url=video["url"],
+                    tempo=tempo,
+                    tracks=track_results,
+                    chords=chords[:50],
+                    analysis_text=analysis_text,
+                ),
+            }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"解析エラー: {str(e)}")
-
-    finally:
-        # 一時ファイルをクリーンアップ
-        try:
-            if audio_path:
-                downloader = get_audio_downloader_service()
-                downloader.cleanup(audio_path)
-        except Exception:
-            pass
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"解析エラー: {str(e)}")
 
 
 # --- 範囲指定解説API ---
