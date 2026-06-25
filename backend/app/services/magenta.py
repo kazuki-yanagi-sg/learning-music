@@ -2,10 +2,9 @@
 音声→MIDI変換サービス
 
 Demucsで楽器分離 → 各トラックをMIDI変換
-- ドラム: librosa onset_detect
-- ボーカル: librosa pyin
-- ベース/その他: Basic Pitch
+- 全トラック（ドラム/ベース/その他/ボーカル）: Basic Pitch
 """
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -13,9 +12,10 @@ from typing import Optional
 
 import mido
 
+logger = logging.getLogger(__name__)
+
 from app.services.basic_pitch_service import get_basic_pitch_service
 from app.services.audio_separator import get_audio_separator_service
-from app.services.librosa_transcriber import get_librosa_transcriber
 
 
 class MagentaService:
@@ -180,7 +180,7 @@ class MagentaService:
             # 1. 元の音声からテンポを検出（最も正確）
             basic_pitch = get_basic_pitch_service()
             tempo, _ = basic_pitch.detect_tempo(str(audio_path))
-            print(f"[Magenta] Detected tempo from original: {tempo:.1f} BPM")
+            logger.info(f"[Magenta] Detected tempo from original: {tempo:.1f} BPM")
 
             # 2. Demucsで楽器分離
             separator = get_audio_separator_service()
@@ -196,31 +196,19 @@ class MagentaService:
 
             separated_tracks = sep_result["tracks"]
 
-            # 3. 各トラックをMIDI変換（楽器別に最適なツールを使用）
+            # 3. 各トラックをMIDI変換（全トラックをBasic Pitchで変換）
             tracks = {}
-            librosa_transcriber = get_librosa_transcriber()
 
             for track_type, track_path in separated_tracks.items():
-                print(f"[Magenta] Processing {track_type} track: {track_path}")
+                logger.info(f"[Magenta] Processing {track_type} track: {track_path}")
 
-                # 楽器別に最適なツールを選択
-                if track_type == "drums":
-                    # ドラム: librosa onset_detect
-                    print(f"[Magenta] Using librosa for drums")
-                    result = librosa_transcriber.extract_drums(track_path, tempo=tempo)
-                    output_key = "drums"
-                elif track_type == "vocals":
-                    # ボーカル: librosa pyin（単音メロディに最適）
-                    print(f"[Magenta] Using librosa pyin for vocals")
-                    result = librosa_transcriber.extract_melody(track_path, tempo=tempo)
-                    output_key = "melody"
-                else:
-                    # ベース/その他: Basic Pitch（和音に最適）
-                    print(f"[Magenta] Using Basic Pitch for {track_type}")
-                    result = basic_pitch.transcribe_track(track_path, track_type, tempo=tempo)
-                    output_key = track_type
+                # 全トラック（drums/bass/other/vocals）をBasic Pitchで変換
+                logger.info(f"[Magenta] Using Basic Pitch for {track_type}")
+                result = basic_pitch.transcribe_track(track_path, track_type, tempo=tempo)
+                # フロントは tracks.melody を参照するため vocals→melody にマッピング
+                output_key = "melody" if track_type == "vocals" else track_type
 
-                print(f"[Magenta] {track_type} result: success={result['success']}, notes={len(result.get('notes', []))}")
+                logger.info(f"[Magenta] {track_type} result: success={result['success']}, notes={len(result.get('notes', []))}")
 
                 if result["success"]:
                     notes = result["notes"]

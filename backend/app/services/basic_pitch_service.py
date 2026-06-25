@@ -306,16 +306,6 @@ class BasicPitchService:
             # 楽器別パラメータ設定
             params = self._get_track_params(track_type)
 
-            # ドラムはBasic Pitchに不向きなのでスキップ
-            if params.get("skip"):
-                print(f"[BasicPitch] {track_type}: skipped (not suitable for pitch detection)")
-                return {
-                    "success": True,
-                    "tempo": round(tempo) if tempo else None,
-                    "notes": [],
-                    "error": None,
-                }
-
             self._ensure_model()
             model_output, midi_data, note_events = predict(
                 str(audio_file),
@@ -397,8 +387,7 @@ class BasicPitchService:
         """楽器別のパラメータを取得（感度UP調整済み）"""
         params = {
             "drums": {
-                # ドラムはBasic Pitchに不向き - スキップフラグ
-                "skip": True,
+                # ドラムもBasic Pitchで変換する（下流で_normalize_drum_pitch / resolution=0.125を適用）
                 "onset_threshold": 0.5,
                 "frame_threshold": 0.5,
                 "min_note_length": 50,
