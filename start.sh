@@ -121,18 +121,21 @@ setup_venv() {
 
 # Dockerサービス起動
 start_docker_services() {
-    echo_info "Docker サービスを起動中 (frontend, voicevox)..."
-    docker-compose up -d frontend voicevox
+    # NOTE: VOICEVOX(TTS読み上げ)は重く、現状アプリから呼び出していないため一時的に無効化。
+    #       再び使う場合は frontend の後ろに voicevox を足し、下のVOICEVOX起動待ちを復活させる。
+    echo_info "Docker サービスを起動中 (frontend)..."
+    docker-compose up -d frontend
 
-    # VOICEVOXの起動待ち
-    echo_info "VOICEVOX の起動を待機中..."
-    for i in {1..30}; do
-        if curl -s http://localhost:50021/version > /dev/null 2>&1; then
-            echo_info "VOICEVOX 起動完了"
-            break
-        fi
-        sleep 1
-    done
+    # VOICEVOX は一時無効化中（起動・待機しない）
+    # docker-compose up -d voicevox
+    # echo_info "VOICEVOX の起動を待機中..."
+    # for i in {1..30}; do
+    #     if curl -s http://localhost:50021/version > /dev/null 2>&1; then
+    #         echo_info "VOICEVOX 起動完了"
+    #         break
+    #     fi
+    #     sleep 1
+    # done
 }
 
 # バックエンド起動

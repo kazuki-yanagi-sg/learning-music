@@ -38,3 +38,4 @@ htmlcov/
 *.bak
 *.tmp
 storage/
+ERRORS.html
