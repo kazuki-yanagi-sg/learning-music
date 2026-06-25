@@ -112,11 +112,12 @@ setup_venv() {
         pip uninstall tensorflow tensorflow-intel tensorflow-io-gcs-filesystem keras -y 2>/dev/null || true
     fi
 
-    # autochord の個別チェック（後から追加された依存関係）
-    if ! pip show autochord &> /dev/null; then
-        echo_info "autochord をインストール中（和音認識用）..."
-        pip install autochord || echo_warn "autochord インストール失敗（和音認識なしで動作）"
-    fi
+    # NOTE: autochord の自動インストールは無効化。
+    #   - autochord は本アプリで未使用の任意依存（無くてもコードは動作する）。
+    #   - 依存先の vamp が build isolation 環境で numpy を見つけられずビルドに毎回失敗し、
+    #     起動のたびに数十秒を無駄にして WARN を出していた。
+    #   - もし将来 autochord を使うなら、numpy を先に入れた上で
+    #     `pip install --no-build-isolation vamp autochord` 等を別途手動で実施すること。
 }
 
 # Dockerサービス起動
@@ -151,6 +152,16 @@ start_backend() {
     # ストレージディレクトリ作成
     mkdir -p "$SCRIPT_DIR/storage/audio"
     mkdir -p "$SCRIPT_DIR/storage/midi"
+
+    # 既存の backend プロセスが port 8001 を握っていると
+    # "Address already in use" で起動に失敗するため、先に掃除する（冪等）。
+    local pids
+    pids=$(lsof -nP -tiTCP:8001 -sTCP:LISTEN 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo_warn "port 8001 を占有中の既存プロセスを停止します: $pids"
+        echo "$pids" | xargs kill -9 2>/dev/null || true
+        sleep 1
+    fi
 
     cd backend
     uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload

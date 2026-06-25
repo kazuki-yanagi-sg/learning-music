@@ -394,10 +394,12 @@ class BasicPitchService:
         params = {
             "drums": {
                 # ドラムもBasic Pitchで変換する（下流で_normalize_drum_pitch / resolution=0.125を適用）
+                # 打楽器は音程が曖昧でBasic Pitchの信頼度（velocity）が低く出るため、
+                # しきい値0.8では全ノートが除外され0件になる。0.3まで下げてヒットを拾う。
                 "onset_threshold": 0.5,
                 "frame_threshold": 0.5,
                 "min_note_length": 50,
-                "confidence_threshold": 0.8,
+                "confidence_threshold": 0.3,
                 "min_freq": None,
                 "max_freq": None,
             },
