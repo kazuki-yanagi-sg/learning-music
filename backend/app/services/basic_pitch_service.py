@@ -404,21 +404,23 @@ class BasicPitchService:
                 "max_freq": None,
             },
             "bass": {
-                "onset_threshold": 0.3,       # 0.5→0.3 感度UP
-                "frame_threshold": 0.25,      # 0.4→0.25 持続音検出強化
-                "min_note_length": 50,        # 100→50ms 細かいノートも拾う
-                "confidence_threshold": 0.3,  # 0.5→0.3 低い音を拾いやすく
-                "min_freq": 30,   # E1あたり
-                "max_freq": 300,  # D4あたり（ベース音域を絞る）
+                "onset_threshold": 0.4,       # 0.3→0.4 弱い倍音由来の過剰ノートを抑制
+                "frame_threshold": 0.3,       # 0.25→0.3 持続音の途切れと過検出のバランス
+                "min_note_length": 80,        # 50→80ms ぶつ切り・ゴーストノート低減
+                "confidence_threshold": 0.4,  # 0.3→0.4 低信頼ノート（誤検出）を除外
+                "min_freq": 41,   # E1（30Hzはサブオクターブ誤検出を生むため引き上げ）
+                "max_freq": 350,  # F4あたり（ベース音域に限定）
             },
             "other": {
-                "onset_threshold": 0.3,       # 0.5→0.3 感度UP
-                "frame_threshold": 0.25,      # 0.4→0.25 持続音検出強化
-                "min_note_length": 50,        # 80→50ms 細かいノートも拾う
-                "confidence_threshold": 0.35, # 0.5→0.35 和音の弱い音を拾う
+                "onset_threshold": 0.35,      # 0.3→0.35 和音の過剰ノートを抑制
+                "frame_threshold": 0.3,       # 0.25→0.3 持続音検出と過検出のバランス
+                "min_note_length": 70,        # 50→70ms 細かすぎるゴーストノート低減
+                "confidence_threshold": 0.4,  # 0.35→0.4 弱い誤検出を除外
                 "min_freq": 80,   # E2あたり
                 "max_freq": 2000, # B6あたり
             },
+            # vocals は magenta側で librosa pyin（単音抽出）に切替済み。
+            # このパラメータは Basic Pitch 経由（transcribe_track単体）の互換用に残す。
             "vocals": {
                 "onset_threshold": 0.3,       # 0.4→0.3 感度UP
                 "frame_threshold": 0.2,       # 0.3→0.2 持続音検出強化
