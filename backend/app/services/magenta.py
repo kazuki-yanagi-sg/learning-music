@@ -1,8 +1,10 @@
 """
 音声→MIDI変換サービス
 
-Demucsで楽器分離 → 各トラックをMIDI変換
-- 全トラック（ドラム/ベース/その他/ボーカル）: Basic Pitch
+Demucsで楽器分離 → 各トラックを「楽器に適した変換器」でMIDI変換
+- drums  : librosa オンセット検出（打楽器に音程検出器は不向き）
+- vocals : librosa pyin 単音抽出（ボーカルは単旋律）
+- bass / other : Basic Pitch（音程楽器）
 """
 import logging
 import os
@@ -15,6 +17,7 @@ import mido
 logger = logging.getLogger(__name__)
 
 from app.services.basic_pitch_service import get_basic_pitch_service
+from app.services.librosa_transcriber import get_librosa_transcriber
 from app.services.audio_separator import get_audio_separator_service
 
 
@@ -145,6 +148,57 @@ class MagentaService:
 
         mid.save(midi_path)
 
+    def _transcribe_track(self, track_type: str, track_path: str, tempo: float) -> dict:
+        """
+        トラック種別に応じて最適な変換器でMIDI変換する
+
+        - drums  : librosa オンセット検出（打楽器は音程検出器に不向き）
+        - vocals : librosa pyin 単音抽出（ボーカルは単旋律）
+        - その他 : Basic Pitch（音程楽器）
+
+        Returns:
+            {"success": bool, "notes": list, "error": str | None}
+        """
+        if track_type == "drums":
+            logger.info(f"[Magenta] Using librosa onset detection for {track_type}")
+            return get_librosa_transcriber().extract_drums(track_path, tempo=tempo)
+
+        if track_type == "vocals":
+            logger.info(f"[Magenta] Using librosa pyin (monophonic) for {track_type}")
+            return get_librosa_transcriber().extract_melody(track_path, tempo=tempo)
+
+        logger.info(f"[Magenta] Using Basic Pitch for {track_type}")
+        return get_basic_pitch_service().transcribe_track(track_path, track_type, tempo=tempo)
+
+    def _build_track_output(
+        self, result: dict, stem: str, output_key: str, tempo: float
+    ) -> dict:
+        """
+        変換結果からトラック出力（notes + MIDIファイル）を構築する
+
+        Returns:
+            {"notes": list, "midi_path": str | None} （失敗時は error も付与）
+        """
+        if not result["success"]:
+            return {
+                "notes": [],
+                "midi_path": None,
+                "error": result.get("error"),
+            }
+
+        notes = result["notes"]
+        midi_path = None
+        if notes:
+            midi_filename = f"{stem}_{output_key}.mid"
+            midi_file = self.temp_dir / midi_filename
+            self._notes_to_midi(notes, tempo, midi_file)
+            midi_path = str(midi_file)
+
+        return {
+            "notes": notes,
+            "midi_path": midi_path,
+        }
+
     def audio_to_4tracks(self, audio_path: str) -> dict:
         """
         音声ファイルを4トラックに分離してMIDI変換
@@ -196,41 +250,25 @@ class MagentaService:
 
             separated_tracks = sep_result["tracks"]
 
-            # 3. 各トラックをMIDI変換（全トラックをBasic Pitchで変換）
+            # 3. 各トラックを「楽器に適した変換器」でMIDI変換
             tracks = {}
 
             for track_type, track_path in separated_tracks.items():
                 logger.info(f"[Magenta] Processing {track_type} track: {track_path}")
 
-                # 全トラック（drums/bass/other/vocals）をBasic Pitchで変換
-                logger.info(f"[Magenta] Using Basic Pitch for {track_type}")
-                result = basic_pitch.transcribe_track(track_path, track_type, tempo=tempo)
+                # トラック種別ごとに最適な変換器を選ぶ
+                result = self._transcribe_track(track_type, track_path, tempo)
                 # フロントは tracks.melody を参照するため vocals→melody にマッピング
                 output_key = "melody" if track_type == "vocals" else track_type
 
-                logger.info(f"[Magenta] {track_type} result: success={result['success']}, notes={len(result.get('notes', []))}")
+                logger.info(
+                    f"[Magenta] {track_type} result: success={result['success']}, "
+                    f"notes={len(result.get('notes', []))}"
+                )
 
-                if result["success"]:
-                    notes = result["notes"]
-
-                    # MIDIファイルを生成
-                    midi_path = None
-                    if notes:
-                        midi_filename = f"{audio_path.stem}_{output_key}.mid"
-                        midi_path = self.temp_dir / midi_filename
-                        self._notes_to_midi(notes, tempo, midi_path)
-                        midi_path = str(midi_path)
-
-                    tracks[output_key] = {
-                        "notes": notes,
-                        "midi_path": midi_path,
-                    }
-                else:
-                    tracks[output_key] = {
-                        "notes": [],
-                        "midi_path": None,
-                        "error": result["error"],
-                    }
+                tracks[output_key] = self._build_track_output(
+                    result, audio_path.stem, output_key, tempo
+                )
 
             return {
                 "success": True,
