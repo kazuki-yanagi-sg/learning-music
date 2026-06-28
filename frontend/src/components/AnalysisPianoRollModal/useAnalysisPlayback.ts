@@ -78,12 +78,16 @@ export function useAnalysisPlayback({
       }
 
       if (isFourTrackResult(result)) {
+        // htdemucs_6s 対応: guitar/keyboard を追加、other は非再生（設計書 B-4）
+        // other は濁り回避のため空配列を渡す（ミュート扱い）
         playbackRef.current = audioEngine.play4TrackAnalysis(
           {
-            drums: mutedTracks.has('drums') ? [] : result.tracks.drums?.notes,
-            bass: mutedTracks.has('bass') ? [] : result.tracks.bass?.notes,
-            other: mutedTracks.has('other') ? [] : result.tracks.other?.notes,
-            melody: mutedTracks.has('melody') ? [] : result.tracks.melody?.notes,
+            drums:    mutedTracks.has('drums')    ? [] : result.tracks.drums?.notes,
+            bass:     mutedTracks.has('bass')     ? [] : result.tracks.bass?.notes,
+            other:    [],  // other は再生しない（htdemucs_6s で guitar/keyboard に分離済み）
+            melody:   mutedTracks.has('melody') ? [] : result.tracks.melody?.notes,  // メロディ（歌メロ=vocals由来）をピアノ音で再生する
+            guitar:   mutedTracks.has('guitar')   ? [] : result.tracks.guitar?.notes,
+            keyboard: mutedTracks.has('keyboard') ? [] : result.tracks.keyboard?.notes,
           },
           mutedTracks,
           onProgress,

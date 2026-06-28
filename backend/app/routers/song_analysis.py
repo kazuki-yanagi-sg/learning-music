@@ -70,7 +70,7 @@ def cleanup_temp_files():
 async def generate_ai_analysis_text(
     video: dict,
     chord_list: list[dict],
-    tempo: int,
+    tempo: float,
     notes_count: int,
 ) -> str:
     """Geminiでコード進行のAI解説を生成する。
@@ -115,8 +115,8 @@ class AnalysisResult(BaseModel):
     thumbnail: Optional[str] = None
     url: Optional[str] = None
 
-    # 解析データ
-    tempo: Optional[int] = None
+    # 解析データ（float で貫通させる）
+    tempo: Optional[float] = None
     duration: Optional[float] = None
     notes_count: int = 0
     notes: list[NoteInfo] = []  # ピアノロール表示用
@@ -451,13 +451,28 @@ class TrackNotes(BaseModel):
 
 
 class FourTrackResult(BaseModel):
-    """4トラック解析結果"""
+    """6stem 解析結果（htdemucs_6s: drums/bass/other/melody/guitar/keyboard）
+
+    htdemucs_6s 切り替えにより従来の 4stem（drums/bass/other）に加えて
+    guitar/keyboard（piano）トラックが追加される。
+    確定ルール（CLAUDE.md:189）: メロディの音源はボーカル(vocals stem)。
+    歌メロをそのまま melody とする。ただし再生音色はピアノにする（歌声では鳴らさない）。
+
+    tracks キー:
+        drums    : ドラム
+        bass     : ベース
+        other    : その他（オリジナル htdemucs_6s の other stem）
+        melody   : vocals stem 由来の歌メロ（再生音色はピアノ）
+        guitar   : ギター
+        keyboard : piano stem 由来（ピアノ伴奏）
+    """
     video_id: str
     title: str
     channel: str
     thumbnail: Optional[str] = None
     url: Optional[str] = None
-    tempo: int = 120
+    # float で貫通させる（round() しない）
+    tempo: float = 120.0
     tracks: dict[str, TrackNotes] = {}
     chords: list[ChordInfo] = []
     analysis_text: Optional[str] = None
@@ -474,7 +489,8 @@ async def analyze_4tracks(video_id: str):
         video_id: YouTubeの動画ID
 
     Returns:
-        4トラック（drums, bass, other, vocals）のノート情報とコード解説
+        各トラック（drums, bass, other, melody, guitar, keyboard）のノート情報とコード解説
+        （melody は vocals 由来の歌メロ・ピアノ音色で再生。keyboard は piano 伴奏）
     """
     # 4トラック解析は MIDI ファイルの後始末を行わない（従来通り audio_path のみ）。
     with cleanup_temp_files() as temp:
@@ -513,9 +529,11 @@ async def analyze_4tracks(video_id: str):
             tracks = result["tracks"]
             tempo = result["tempo"]
 
-            # 4. コード進行を抽出（ベース + other から）
+            # 4. コード進行を抽出（bass + keyboard + guitar から）
+            # 設計書 A-4: htdemucs_6s で guitar/piano が個別分離されるため
+            # コード推定には bass/keyboard/guitar を使う（other/melody は除外）
             all_notes = []
-            for track_type in ["bass", "other"]:
+            for track_type in ["bass", "keyboard", "guitar"]:
                 if track_type in tracks and tracks[track_type].get("notes"):
                     all_notes.extend(tracks[track_type]["notes"])
 

@@ -3,8 +3,10 @@
 
 Demucsで楽器分離 → 各トラックを「楽器に適した変換器」でMIDI変換
 - drums  : librosa オンセット検出（打楽器に音程検出器は不向き）
-- vocals : librosa pyin 単音抽出（ボーカルは単旋律）
-- bass / other : Basic Pitch（音程楽器）
+- vocals : librosa pyin 単音抽出 → melody（CLAUDE.md:189 の確定ルール。
+  メロディの音源はボーカル。再生音色はフロント側でピアノにする）
+- bass / other / guitar / piano : Basic Pitch（音程楽器）
+- keyboard : piano stem 由来
 """
 import logging
 import os
@@ -16,9 +18,26 @@ import mido
 
 logger = logging.getLogger(__name__)
 
-from app.services.basic_pitch_service import get_basic_pitch_service
-from app.services.librosa_transcriber import get_librosa_transcriber
-from app.services.audio_separator import get_audio_separator_service
+# 重い依存（torch 等）を持つサービスはトップレベルでインポートせず、
+# 使用する直前に遅延インポートすることでテストのモック容易性を確保する。
+
+
+def get_basic_pitch_service():
+    """BasicPitchService のシングルトンを遅延取得する"""
+    from app.services.basic_pitch_service import get_basic_pitch_service as _get
+    return _get()
+
+
+def get_librosa_transcriber():
+    """LibrosaTranscriber のシングルトンを遅延取得する"""
+    from app.services.librosa_transcriber import get_librosa_transcriber as _get
+    return _get()
+
+
+def get_audio_separator_service():
+    """AudioSeparatorService のシングルトンを遅延取得する"""
+    from app.services.audio_separator import get_audio_separator_service as _get
+    return _get()
 
 
 class MagentaService:
@@ -60,9 +79,20 @@ class MagentaService:
             }
 
         try:
-            # Basic Pitchで音声を分析
+            # LibrosaTranscriber でテンポ・オフセット（第1拍）を先に検出する
+            # offset: 楽曲冒頭の無音部分を除いた第1拍の開始時刻（秒）
+            # これを transcribe_audio に渡してノート時刻を第1拍原点に揃える
+            tempo_info = get_librosa_transcriber().detect_tempo(str(audio_path))
+            detected_offset = tempo_info.offset
+            detected_tempo = tempo_info.tempo  # normalize_tempo 済み float BPM
+            logger.info(
+                f"[Magenta.audio_to_midi] detected tempo={detected_tempo:.3f} BPM, "
+                f"offset={detected_offset:.3f}s"
+            )
+
+            # Basic Pitchで音声を分析（オフセット補正を適用する）
             basic_pitch = get_basic_pitch_service()
-            result = basic_pitch.transcribe_audio(str(audio_path))
+            result = basic_pitch.transcribe_audio(str(audio_path), offset=detected_offset)
 
             if not result["success"]:
                 return {
@@ -74,7 +104,9 @@ class MagentaService:
                 }
 
             notes = result["notes"]
-            tempo = result["tempo"] or 120  # Basic Pitchはテンポ検出しないため120をデフォルト
+            # LibrosaTranscriber が検出した normalize 済みテンポを優先する
+            # （Basic Pitch は音程検出器なのでテンポ精度が低い）
+            tempo = detected_tempo or result["tempo"] or 120
 
             # ノート情報をMIDIファイルに変換
             midi_filename = audio_path.stem + ".mid"
@@ -148,27 +180,67 @@ class MagentaService:
 
         mid.save(midi_path)
 
-    def _transcribe_track(self, track_type: str, track_path: str, tempo: float) -> dict:
+    # stem 名 → 出力キー変換マップ
+    # 確定ルール（CLAUDE.md:189）: メロディの音源はボーカル(vocals stem)。
+    #   歌のメロディをそのまま melody とする。ただし再生音色はピアノにする（フロント側）。
+    # keyboard はピアノ伴奏（piano stem）を割り当てる。
+    # 値は list[str]（1 stem を複数キーへ複製する将来拡張のため）。
+    TRACK_KEY_MAP: dict[str, list[str]] = {
+        "vocals": ["melody"],   # 歌メロを melody に（音色はフロントでピアノ）
+        "piano": ["keyboard"],  # ピアノ伴奏を keyboard に
+    }
+
+    def _stem_to_output_keys(self, stem_name: str) -> list[str]:
+        """stem 名を出力キー（複数可）に変換する
+
+        TRACK_KEY_MAP に定義がある場合はマップ後のキー一覧を、
+        それ以外は stem 名そのもの 1 件のリストを返す。
+        """
+        return self.TRACK_KEY_MAP.get(stem_name, [stem_name])
+
+    def _transcribe_track(
+        self,
+        track_type: str,
+        track_path: str,
+        tempo: float,
+        offset: float = 0.0,
+    ) -> dict:
         """
         トラック種別に応じて最適な変換器でMIDI変換する
 
         - drums  : librosa オンセット検出（打楽器は音程検出器に不向き）
-        - vocals : librosa pyin 単音抽出（ボーカルは単旋律）
-        - その他 : Basic Pitch（音程楽器）
+        - vocals : librosa pyin 単音抽出（歌メロは単旋律。melody の音源）
+        - その他（bass/other/guitar/piano） : Basic Pitch（音程楽器）
+
+        確定ルール（CLAUDE.md:189）: メロディの音源はボーカル(vocals stem)。
+        歌メロを pyin で単旋律抽出する（再生音色はフロント側でピアノにする）。
+
+        Args:
+            track_type: 変換対象トラック種別（stem 名）
+            track_path: 音声ファイルパス
+            tempo:      BPM（float。round しない）
+            offset:     第1拍オフセット（秒）。ノート時刻をシフトして第1拍を原点に揃える
 
         Returns:
             {"success": bool, "notes": list, "error": str | None}
         """
         if track_type == "drums":
             logger.info(f"[Magenta] Using librosa onset detection for {track_type}")
-            return get_librosa_transcriber().extract_drums(track_path, tempo=tempo)
+            return get_librosa_transcriber().extract_drums(
+                track_path, tempo=tempo, offset=offset
+            )
 
         if track_type == "vocals":
-            logger.info(f"[Magenta] Using librosa pyin (monophonic) for {track_type}")
-            return get_librosa_transcriber().extract_melody(track_path, tempo=tempo)
+            logger.info(f"[Magenta] Using librosa pyin (歌メロ単音抽出) for {track_type}")
+            return get_librosa_transcriber().extract_melody(
+                track_path, tempo=tempo, offset=offset
+            )
 
+        # bass / other / guitar / piano → Basic Pitch（音程楽器）
         logger.info(f"[Magenta] Using Basic Pitch for {track_type}")
-        return get_basic_pitch_service().transcribe_track(track_path, track_type, tempo=tempo)
+        return get_basic_pitch_service().transcribe_track(
+            track_path, track_type, tempo=tempo, offset=offset
+        )
 
     def _build_track_output(
         self, result: dict, stem: str, output_key: str, tempo: float
@@ -213,8 +285,11 @@ class MagentaService:
                 "tracks": {
                     "drums": {"notes": [...], "midi_path": "..."},
                     "bass": {"notes": [...], "midi_path": "..."},
-                    "other": {"notes": [...], "midi_path": "..."},  # ギター/キーボード
-                    "vocals": {"notes": [], "midi_path": None},  # 使用しない
+                    "other": {"notes": [...], "midi_path": "..."},
+                    "guitar": {"notes": [...], "midi_path": "..."},
+                    "melody": {"notes": [...], "midi_path": "..."},    # vocals stem 由来（歌メロ・ピアノ音色で再生）
+                    "keyboard": {"notes": [...], "midi_path": "..."},  # piano stem 由来（ピアノ伴奏）
+                    # vocals は含めない（メロディに流用しないため）
                 },
                 "error": エラーメッセージ（失敗時）
             }
@@ -231,16 +306,24 @@ class MagentaService:
         separated_tracks = None
 
         try:
-            # 1. 元の音声からテンポを検出（最も正確）
-            basic_pitch = get_basic_pitch_service()
-            tempo, _ = basic_pitch.detect_tempo(str(audio_path))
-            logger.info(f"[Magenta] Detected tempo from original: {tempo:.1f} BPM")
+            # 1. 元の音声からテンポを検出（LibrosaTranscriber 直呼びで TempoInfo を取得）
+            # TempoInfo: tempo (float BPM) / beat_times / offset（第1拍オフセット）
+            tempo_info = get_librosa_transcriber().detect_tempo(str(audio_path))
+            tempo = tempo_info.tempo   # float のまま保持（round しない）
+            offset = tempo_info.offset
+            logger.info(
+                f"[Magenta] Detected tempo from original: {tempo:.3f} BPM, "
+                f"offset={offset:.3f}s"
+            )
 
             # 2. Demucsで楽器分離
             separator = get_audio_separator_service()
             sep_result = separator.separate(str(audio_path))
 
             if not sep_result["success"]:
+                # separator のエラーは既に「型名: メッセージ」形式なので二重に
+                # "Separation failed:" を付けない（元情報を潰さない）。
+                logger.error(f"[Magenta] 楽器分離に失敗: {sep_result['error']}")
                 return {
                     "success": False,
                     "tempo": None,
@@ -252,27 +335,48 @@ class MagentaService:
 
             # 3. 各トラックを「楽器に適した変換器」でMIDI変換
             tracks = {}
+            # apply_offset_to_notes は librosa_transcriber で定義された純関数
+            from app.services.librosa_transcriber import apply_offset_to_notes
 
             for track_type, track_path in separated_tracks.items():
+                # 確定ルール（CLAUDE.md:189）: メロディの音源はボーカル(vocals stem)。
+                # vocals は melody として処理する（スキップしない）。
                 logger.info(f"[Magenta] Processing {track_type} track: {track_path}")
 
-                # トラック種別ごとに最適な変換器を選ぶ
-                result = self._transcribe_track(track_type, track_path, tempo)
-                # フロントは tracks.melody を参照するため vocals→melody にマッピング
-                output_key = "melody" if track_type == "vocals" else track_type
+                # トラック種別ごとに最適な変換器を選ぶ。
+                # offset は _transcribe_track には渡さず（二重適用防止）、
+                # audio_to_4tracks レベルで apply_offset_to_notes を一元適用する。
+                result = self._transcribe_track(track_type, track_path, tempo, offset=0.0)
+
+                # 第1拍オフセット補正: 全トラックのノートを グリッド原点に揃える
+                # apply_offset_to_notes は純関数（元のリストを変更しない）
+                if result["success"] and offset != 0.0:
+                    result = dict(result)  # 元の dict を変更しない（シャローコピー）
+                    result["notes"] = apply_offset_to_notes(result["notes"], offset)
 
                 logger.info(
                     f"[Magenta] {track_type} result: success={result['success']}, "
                     f"notes={len(result.get('notes', []))}"
                 )
 
-                tracks[output_key] = self._build_track_output(
-                    result, audio_path.stem, output_key, tempo
-                )
+                # stem 名 → 出力キー。vocals→melody, piano→keyboard, その他はそのまま。
+                # melody（歌メロ）は単旋律化して和音の取りこぼし／重なりを防ぐ
+                # （pyin は基本単音だが、安全網として skyline を通す）。
+                # MIDI ファイル名は output_key ごとに分かれる（{stem}_{output_key}.mid）。
+                for output_key in self._stem_to_output_keys(track_type):
+                    track_result = result
+                    if output_key == "melody" and result.get("success"):
+                        from app.services.basic_pitch_service import select_melody_line
+                        track_result = dict(result)
+                        track_result["notes"] = select_melody_line(result["notes"])
+                    tracks[output_key] = self._build_track_output(
+                        track_result, audio_path.stem, output_key, tempo
+                    )
 
             return {
                 "success": True,
-                "tempo": round(tempo),
+                # float で貫通させる（round() しない。フロントは number 型で問題なし）
+                "tempo": float(tempo),
                 "tracks": tracks,
                 "error": None,
             }
@@ -366,7 +470,8 @@ class MagentaService:
             return {
                 "success": True,
                 "notes": notes,
-                "tempo": round(bpm),
+                # float で貫通させる（round() しない）
+                "tempo": float(bpm),
                 "duration": round(duration, 2),
                 "error": None,
             }

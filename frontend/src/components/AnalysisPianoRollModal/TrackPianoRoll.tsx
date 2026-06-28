@@ -8,7 +8,13 @@
 import { useMemo, useRef, useEffect } from 'react'
 import { NoteInfo } from '../../services/songAnalysisApi'
 
-// トラック設定
+/**
+ * トラック設定（htdemucs_6s 対応で guitar/keyboard を追加）
+ *
+ * 描画対象: bass / guitar / keyboard（melody/other は描画しない）
+ * drums は AnalysisDrumGrid で別途描画するため TRACK_CONFIG には含めるが
+ * AnalysisPianoRollModal の描画リストには含めない。
+ */
 const TRACK_CONFIG = {
   drums: {
     label: 'Drums',
@@ -26,13 +32,26 @@ const TRACK_CONFIG = {
     label: 'Guitar/Keys',
     color: '#3b82f6',
     bgColor: '#1e3a8a',
-    defaultPitchRange: { min: 48, max: 84 }, // コード楽器用
+    defaultPitchRange: { min: 48, max: 84 }, // コード楽器用（後方互換で残す）
   },
   melody: {
     label: 'Melody',
-    color: '#f59e0b',  // オレンジ系（ボーカルメロディを強調）
+    color: '#f59e0b',  // オレンジ系（ピアノメロディを強調）
     bgColor: '#78350f',
-    defaultPitchRange: { min: 48, max: 84 }, // ボーカル音域
+    defaultPitchRange: { min: 48, max: 84 }, // ピアノメロディ音域
+  },
+  // htdemucs_6s 追加 stem（設計書 B-3）
+  guitar: {
+    label: 'Guitar',
+    color: '#a78bfa',  // 紫系（ギターを視覚的に識別）
+    bgColor: '#4c1d95',
+    defaultPitchRange: { min: 40, max: 84 }, // ギター音域 E2〜C6
+  },
+  keyboard: {
+    label: 'Keyboard',
+    color: '#38bdf8',  // 水色（キーボード/ピアノを識別）
+    bgColor: '#0c4a6e',
+    defaultPitchRange: { min: 48, max: 84 }, // キーボード中音域
   },
 } as const
 
