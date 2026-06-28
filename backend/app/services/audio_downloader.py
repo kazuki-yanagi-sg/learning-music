@@ -36,7 +36,10 @@ class AudioDownloaderService:
         """
         argv = [
             "yt-dlp",
-            "--js-runtimes", "nodejs",  # Node.jsをJSランタイムとして使用
+            # YouTube の JS チャレンジ(n-sig)解決に使う JavaScript ランタイム。
+            # yt-dlp の対応名は deno/node/bun/quickjs。"nodejs" は無視され、
+            # 解決できず HTTP 403 になるため、導入済みの deno を明示指定する。
+            "--js-runtimes", "deno",
             "-x",  # 音声のみ抽出
             "--audio-format", "wav",
             "-o", output_template,
