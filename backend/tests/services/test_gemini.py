@@ -139,3 +139,55 @@ class TestGeminiService:
 
             assert "失敗しました" in result
             assert "API Error" in result
+
+    @pytest.mark.asyncio
+    async def test_generate_retries_on_transient_error(self):
+        """一時的な503エラーはリトライして成功する"""
+        mock_client = MagicMock()
+        mock_response = Mock()
+        mock_response.text = "リトライ後の解説文"
+        # 1回目は503、2回目は成功
+        mock_client.models.generate_content.side_effect = [
+            Exception("503 UNAVAILABLE. This model is currently experiencing high demand."),
+            mock_response,
+        ]
+
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-api-key"}):
+            with patch("app.services.gemini.time.sleep"):  # バックオフ待機をスキップ
+                from app.services.gemini import GeminiService
+
+                service = GeminiService.__new__(GeminiService)
+                service.client = mock_client
+                service.model = "gemini-2.5-flash"
+
+                result = await service.generate_song_analysis(
+                    track_name="テスト", artist="テスト", key="C", mode="major",
+                    tempo=120, chords=[], notes_count=0,
+                )
+
+                assert result == "リトライ後の解説文"
+                assert mock_client.models.generate_content.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_generate_does_not_retry_on_permanent_error(self):
+        """恒久的なエラーはリトライせず即座に失敗を返す"""
+        mock_client = MagicMock()
+        mock_client.models.generate_content.side_effect = Exception("400 INVALID_ARGUMENT")
+
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-api-key"}):
+            with patch("app.services.gemini.time.sleep") as mock_sleep:
+                from app.services.gemini import GeminiService
+
+                service = GeminiService.__new__(GeminiService)
+                service.client = mock_client
+                service.model = "gemini-2.5-flash"
+
+                result = await service.generate_song_analysis(
+                    track_name="テスト", artist="テスト", key="C", mode="major",
+                    tempo=120, chords=[], notes_count=0,
+                )
+
+                assert "失敗しました" in result
+                # 恒久エラーは1回だけ呼ばれ、sleep（リトライ待機）は発生しない
+                assert mock_client.models.generate_content.call_count == 1
+                mock_sleep.assert_not_called()

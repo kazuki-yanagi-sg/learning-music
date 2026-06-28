@@ -113,16 +113,17 @@ describe('観点1: 描画・開閉', () => {
     expect(screen.getByText('4Track')).toBeInTheDocument()
     // "150 BPM" はヘッダーのバッジ＋ドラムグリッド内テンポ表示の 2 箇所に出る（現状）
     expect(screen.getAllByText('150 BPM')).toHaveLength(2)
-    // TrackPianoRoll のラベル（melody=Melody, bass=Bass, other=Guitar/Keys）
-    expect(screen.getByText('Melody')).toBeInTheDocument()
+    // 描画リスト（方針変更: bass/melody を描画、other は非表示）
+    // 4stem フィクスチャには guitar/keyboard は含まれないため非表示
     expect(screen.getByText('Bass')).toBeInTheDocument()
-    expect(screen.getByText('Guitar/Keys')).toBeInTheDocument()
+    expect(screen.getByText('Melody')).toBeInTheDocument()          // melody は表示
+    expect(screen.queryByText('Guitar/Keys')).not.toBeInTheDocument() // other は非表示
   })
 
-  it('各トラックのノート数がヘッダーに表示される（melody=1, bass=1, other=1 notes）', () => {
+  it('各トラックのノート数がヘッダーに表示される（bass=1 notes）', () => {
     render(<AnalysisPianoRollModal isOpen onClose={() => {}} result={makeFourTrackResult()} />)
-    // melody/bass/other がそれぞれ 1 ノート → "(1 notes)" が複数出る
-    expect(screen.getAllByText('(1 notes)').length).toBeGreaterThanOrEqual(3)
+    // bass が 1 ノート → "(1 notes)" が少なくとも 1 箇所出る
+    expect(screen.getAllByText('(1 notes)').length).toBeGreaterThanOrEqual(1)
   })
 
   it('合計ノート数（totalNotes）がヘッダーに表示される', () => {
@@ -165,10 +166,16 @@ describe('観点2: 再生トグル', () => {
     await screen.findByRole('button', { name: '⏹ Stop' })
 
     const [tracksArg, mutedArg, onProgressArg, startFromArg] = play4TrackMock.mock.calls[0]
-    expect(Object.keys(tracksArg).sort()).toEqual(['bass', 'drums', 'melody', 'other'])
-    // ミュートなし → 各トラックにノート配列が渡る
-    expect(tracksArg.melody).toHaveLength(1)
+    // other は [] で渡す（非再生）、melody/guitar/keyboard は再生する
+    const actualKeys = Object.keys(tracksArg).sort()
+    expect(actualKeys).toContain('bass')
+    expect(actualKeys).toContain('drums')
+    expect(actualKeys).toContain('guitar')
+    expect(actualKeys).toContain('keyboard')
+    // ミュートなし → drums は実ノート配列、other は空配列（非再生）、melody は再生する
     expect(tracksArg.drums).toHaveLength(2)
+    expect(tracksArg.other).toEqual([])      // other は非再生
+    expect(tracksArg.melody).toHaveLength(1) // melody（ボーカル）は再生する
     expect(mutedArg).toBeInstanceOf(Set)
     expect(mutedArg.size).toBe(0)
     expect(typeof onProgressArg).toBe('function')
@@ -231,7 +238,9 @@ describe('観点3: ミュート', () => {
 
     const [tracksArg, mutedArg] = play4TrackMock.mock.calls[0]
     expect(tracksArg.bass).toEqual([]) // ミュート → 空配列
-    expect(tracksArg.melody).toHaveLength(1) // 非ミュートは維持
+    // other は常に空（非再生）。melody（ボーカル）はミュートしない限り再生する
+    expect(tracksArg.other).toEqual([])
+    expect(tracksArg.melody).toHaveLength(1)
     expect(mutedArg.has('bass')).toBe(true)
   })
 })

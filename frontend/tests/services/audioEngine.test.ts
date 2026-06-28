@@ -83,6 +83,7 @@ const engine = audioEngine as unknown as Record<string, unknown>
 
 // 楽器モック一式を注入し、soundfont 有無を切り替える
 function setup(opts: { soundfontsLoaded: boolean; drumSamplesLoaded: boolean }) {
+  // melody は sfPiano を流用するため sfVoice は廃止済み
   const sf = { sfBass: makeSf(), sfPiano: makeSf(), sfGuitar: makeSf() }
   const synth = {
     bass: makeSynth(),
@@ -346,11 +347,18 @@ describe('playAnalysisNotes / play4TrackAnalysis（スケジュール再生）',
     expect(sf.sfGuitar.play).toHaveBeenCalledWith(FAKE_NOTE, TIME, { duration: 0.5 })
   })
 
-  it('play4TrackAnalysis melody(soundfont あり) → sfPiano.play で再生', () => {
+  it('play4TrackAnalysis melody(soundfont あり) → sfPiano.play（ピアノ音源流用）で再生', () => {
+    // melody は sfPiano（acoustic_grand_piano）を流用する（声系音源 sfVoice は廃止済み）
     const { sf } = setup({ soundfontsLoaded: true, drumSamplesLoaded: false })
     audioEngine.play4TrackAnalysis({ melody: notes })
     flushScheduled(TIME)
-    expect(sf.sfPiano.play).toHaveBeenCalledWith(FAKE_NOTE, TIME, { duration: 0.5 })
+    // sfPiano で再生されること（melody=sfPiano 統一）。
+    // melody は主旋律として少し大きく鳴らすため相対ゲイン(2.0/1.5)を渡す。
+    expect(sf.sfPiano.play).toHaveBeenCalledWith(
+      FAKE_NOTE,
+      TIME,
+      { duration: 0.5, gain: 2.0 / 1.5 },
+    )
   })
 
   it('play4TrackAnalysis bass(soundfont なし) → bass.triggerAttackRelease(freq, duration, time)', () => {

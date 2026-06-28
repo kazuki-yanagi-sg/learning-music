@@ -62,14 +62,18 @@ export function AnalysisPianoRollModal({
     clearSelection,
   })
 
-  // トラックデータ
+  // トラックデータ（htdemucs_6s: guitar/keyboard を追加）
+  // other は後方互換のため保持するが描画リストには含めない
+  // melody は描画リストに追加（bass/guitar/keyboard/melody の4トラックを表示）
   const tracksData = useMemo(() => {
     if (isFourTrackResult(result)) {
       return {
-        drums: result.tracks.drums?.notes || [],
-        bass: result.tracks.bass?.notes || [],
-        other: result.tracks.other?.notes || [],
-        melody: result.tracks.melody?.notes || [],  // ボーカルメロディ
+        drums:    result.tracks.drums?.notes    || [],
+        bass:     result.tracks.bass?.notes     || [],
+        other:    result.tracks.other?.notes    || [],  // 描画しないが maxTime 計算に使う
+        melody:   result.tracks.melody?.notes   || [],  // 描画対象（ピアノロールで表示）
+        guitar:   result.tracks.guitar?.notes   || [],  // htdemucs_6s 追加
+        keyboard: result.tracks.keyboard?.notes || [],  // htdemucs_6s 追加（piano stem）
       }
     }
     return { default: result.notes || [] }
@@ -279,26 +283,12 @@ export function AnalysisPianoRollModal({
         {/* トラック別ピアノロール */}
         <div className="flex-1 overflow-y-auto">
           {is4Track ? (
-            // 4トラック表示
+            // 6トラック表示（htdemucs_6s 対応）
+            // 描画リスト: bass / guitar / keyboard / melody
+            // other は描画しない（guitar/keyboard で代替）
+            // drums は AnalysisDrumGrid で別途描画
             <>
-              {/* メロディ（ボーカル）は一番上に表示 */}
-              <TrackPianoRoll
-                trackType="melody"
-                notes={tracksData.melody || []}
-                maxTime={maxTime}
-                zoom={zoom}
-                playbackTime={playbackTime}
-                isPlaying={isPlaying}
-                isMuted={mutedTracks.has('melody')}
-                onToggleMute={() => toggleMute('melody')}
-                onSeek={handleSeek}
-                onDragStart={handleDragStart}
-                onDragMove={handleDragMove}
-                onDragEnd={handleDragEnd}
-                selectionStart={selectionStart}
-                selectionEnd={selectionEnd}
-              />
-              {/* ドラムは専用グリッド */}
+              {/* ドラムは専用グリッド（常に表示） */}
               <AnalysisDrumGrid
                 notes={tracksData.drums || []}
                 maxTime={maxTime}
@@ -315,9 +305,9 @@ export function AnalysisPianoRollModal({
                 selectionStart={selectionStart}
                 selectionEnd={selectionEnd}
               />
-              {/* ベース・その他はピアノロール */}
-              {(['bass', 'other'] as TrackType[]).map(trackType => {
-                const notes = tracksData[trackType] || []
+              {/* bass / guitar / keyboard / melody をピアノロールで描画 */}
+              {(['bass', 'guitar', 'keyboard', 'melody'] as TrackType[]).map(trackType => {
+                const notes = tracksData[trackType as keyof typeof tracksData] || []
                 return (
                   <TrackPianoRoll
                     key={trackType}

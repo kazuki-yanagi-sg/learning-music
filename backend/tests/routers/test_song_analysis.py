@@ -82,6 +82,40 @@ class TestSongAnalysisRouter:
         assert response.status_code == 404
 
 
+class TestFloatTempoModels:
+    """AnalysisResult / FourTrackResult が float BPM をバリデーションエラーなしで受け入れる（仕様 4-2）"""
+
+    def test_analysis_result_accepts_float_tempo(self):
+        """AnalysisResult(tempo=173.5) はバリデーションエラーにならず tempo == 173.5"""
+        from app.routers.song_analysis import AnalysisResult
+
+        result = AnalysisResult(
+            video_id="vid001",
+            title="テスト曲",
+            channel="テストチャンネル",
+            thumbnail="https://example.com/thumb.jpg",
+            url="https://www.youtube.com/watch?v=vid001",
+            tempo=173.5,
+        )
+        assert result.tempo == 173.5, f"tempo が float のまま保持されない: {result.tempo}"
+        assert isinstance(result.tempo, float), f"tempo の型が float でない: {type(result.tempo)}"
+
+    def test_four_track_result_accepts_float_tempo(self):
+        """FourTrackResult(tempo=173.5) はバリデーションエラーにならず tempo == 173.5"""
+        from app.routers.song_analysis import FourTrackResult
+
+        result = FourTrackResult(
+            video_id="vid001",
+            title="テスト曲",
+            channel="テストチャンネル",
+            thumbnail="https://example.com/thumb.jpg",
+            url="https://www.youtube.com/watch?v=vid001",
+            tempo=173.5,
+        )
+        assert result.tempo == 173.5, f"tempo が float のまま保持されない: {result.tempo}"
+        assert isinstance(result.tempo, float), f"tempo の型が float でない: {type(result.tempo)}"
+
+
 class TestChordDetection:
     """コード検出のテスト（MagentaService）"""
 
@@ -532,3 +566,116 @@ class TestAnalyzeStreamCharacterization:
         assert ("ai", 95) in seq  # 95 は常に送られる
         gemini.generate_song_analysis.assert_not_called()
         assert events[-1]["data"]["analysis_text"] is None
+
+
+class TestFourTrackResultWith6Stems:
+    """FourTrackResult に guitar/keyboard フィールドが追加されていること（設計書 A-4）
+
+    - FourTrackResult モデルが guitar/keyboard フィールドを受け入れること
+    - analyze_4tracks エンドポイントが guitar/keyboard トラックを返せること
+    - コード抽出対象が bass + keyboard + guitar になっていること
+    """
+
+    def test_four_track_result_accepts_guitar_keyboard_fields(self):
+        """FourTrackResult が guitar/keyboard フィールドを受け入れること"""
+        from app.routers.song_analysis import FourTrackResult, TrackNotes
+
+        # guitar/keyboard フィールドを含む FourTrackResult を作成
+        result = FourTrackResult(
+            video_id="vid001",
+            title="テスト曲",
+            channel="テストチャンネル",
+            tempo=140.0,
+            tracks={
+                "drums": TrackNotes(notes=[], midi_path=None),
+                "bass": TrackNotes(notes=[], midi_path=None),
+                "other": TrackNotes(notes=[], midi_path=None),
+                "melody": TrackNotes(notes=[], midi_path=None),
+                "guitar": TrackNotes(notes=[], midi_path=None),
+                "keyboard": TrackNotes(notes=[], midi_path=None),
+            },
+        )
+        assert "guitar" in result.tracks, "FourTrackResult が guitar フィールドを持たない"
+        assert "keyboard" in result.tracks, "FourTrackResult が keyboard フィールドを持たない"
+
+    @patch("app.routers.song_analysis.get_gemini_service")
+    @patch("app.routers.song_analysis.get_magenta_service")
+    @patch("app.routers.song_analysis.get_audio_downloader_service")
+    @patch("app.routers.song_analysis.get_youtube_service")
+    def test_analyze_4tracks_returns_guitar_keyboard_tracks(
+        self, mock_yt, mock_dl, mock_mag, mock_gem, client
+    ):
+        """analyze_4tracks が guitar/keyboard トラックを含むレスポンスを返すこと"""
+        mock_yt.return_value = _make_youtube()
+        mock_dl.return_value = _make_downloader()
+        mock_gem.return_value = _make_gemini()
+
+        # 6stem を返すマジェンタモック
+        magenta = Mock()
+        magenta.audio_to_4tracks.return_value = {
+            "success": True,
+            "tempo": 140,
+            "tracks": {
+                "drums": {"notes": [], "midi_path": None},
+                "bass": {"notes": [NOTES[0]], "midi_path": None},
+                "other": {"notes": [], "midi_path": None},
+                "melody": {"notes": [], "midi_path": None},
+                "guitar": {"notes": [NOTES[1]], "midi_path": None},
+                "keyboard": {"notes": [], "midi_path": None},
+            },
+        }
+        magenta.extract_chords_from_notes.return_value = CHORDS_DATA
+        mock_mag.return_value = magenta
+
+        response = client.get("/api/v1/song-analysis/analyze-4tracks/vid123")
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert "guitar" in data["tracks"], "レスポンスに guitar トラックがない"
+        assert "keyboard" in data["tracks"], "レスポンスに keyboard トラックがない"
+
+    @patch("app.routers.song_analysis.get_gemini_service")
+    @patch("app.routers.song_analysis.get_magenta_service")
+    @patch("app.routers.song_analysis.get_audio_downloader_service")
+    @patch("app.routers.song_analysis.get_youtube_service")
+    def test_chord_extraction_uses_bass_keyboard_guitar(
+        self, mock_yt, mock_dl, mock_mag, mock_gem, client
+    ):
+        """コード抽出が bass + keyboard + guitar のノートを参照すること（設計書 A-4）"""
+        mock_yt.return_value = _make_youtube()
+        mock_dl.return_value = _make_downloader()
+        mock_gem.return_value = _make_gemini()
+
+        bass_note = {"pitch": 48, "start": 0.0, "end": 0.5, "velocity": 80}
+        keyboard_note = {"pitch": 60, "start": 0.0, "end": 0.5, "velocity": 80}
+        guitar_note = {"pitch": 64, "start": 0.0, "end": 0.5, "velocity": 80}
+        other_note = {"pitch": 72, "start": 0.0, "end": 0.5, "velocity": 80}  # other は除外
+
+        magenta = Mock()
+        magenta.audio_to_4tracks.return_value = {
+            "success": True,
+            "tempo": 140,
+            "tracks": {
+                "drums": {"notes": [], "midi_path": None},
+                "bass": {"notes": [bass_note], "midi_path": None},
+                "other": {"notes": [other_note], "midi_path": None},
+                "melody": {"notes": [], "midi_path": None},
+                "guitar": {"notes": [guitar_note], "midi_path": None},
+                "keyboard": {"notes": [keyboard_note], "midi_path": None},
+            },
+        }
+        magenta.extract_chords_from_notes.return_value = CHORDS_DATA
+        mock_mag.return_value = magenta
+
+        client.get("/api/v1/song-analysis/analyze-4tracks/vid123")
+
+        # extract_chords_from_notes に渡されたノートを検証
+        call_args = magenta.extract_chords_from_notes.call_args
+        passed_notes = call_args.args[0] if call_args.args else call_args[0][0]
+
+        passed_pitches = {n["pitch"] for n in passed_notes}
+        # bass/keyboard/guitar が含まれること
+        assert bass_note["pitch"] in passed_pitches, "bass ノートが含まれていない"
+        assert keyboard_note["pitch"] in passed_pitches, "keyboard ノートが含まれていない"
+        assert guitar_note["pitch"] in passed_pitches, "guitar ノートが含まれていない"
+        # other は除外されること
+        assert other_note["pitch"] not in passed_pitches, "other ノートが含まれてはいけない"

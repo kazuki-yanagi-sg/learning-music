@@ -9,6 +9,20 @@ basic_pitch_service.transcribe_track / transcribe_audio が返す dict の契約
 from pydantic import BaseModel, Field
 
 
+class TempoInfo(BaseModel):
+    """librosa beat_track によるテンポ検出結果
+
+    Attributes:
+        tempo: 検出テンポ（BPM）。float で管理し round() を避ける
+        beat_times: ビート位置の時間配列（秒）
+        offset: 第1拍の時刻（クオンタイズ原点）。0.0 はオフセットなし
+    """
+
+    tempo: float
+    beat_times: list[float] = Field(default_factory=list)
+    offset: float = 0.0
+
+
 class TranscriptionResult(BaseModel):
     """Basic Pitch による変換結果
 
@@ -20,7 +34,8 @@ class TranscriptionResult(BaseModel):
     """
 
     success: bool
-    tempo: int | None = None
+    # float で貫通させ round() しない（フロントは number 型で問題なし）
+    tempo: float | None = None
     # まずは互換重視で list[dict]。NoteData 化は将来ステップで検討する。
     notes: list[dict] = Field(default_factory=list)
     error: str | None = None

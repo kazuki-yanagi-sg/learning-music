@@ -3,8 +3,29 @@ Gemini API サービス
 
 楽曲解析結果の解説生成
 """
+import logging
 import os
+import time
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+# 一時的（リトライで回復しうる）なGemini APIエラーの判定キーワード。
+# gemini-2.5-flash は混雑時に 503 UNAVAILABLE / 429 を返すが、数秒後の再試行で回復する。
+_TRANSIENT_ERROR_KEYWORDS = (
+    "503",
+    "unavailable",
+    "overloaded",
+    "high demand",
+    "429",
+    "resource_exhausted",
+    "rate limit",
+    "deadline",
+    "timeout",
+)
+# リトライ回数と待機（指数バックオフ: 1s, 2s, 4s）
+_MAX_RETRIES = 3
+_BACKOFF_BASE_SECONDS = 1.0
 
 from app.prompts import (
     get_system_prompt,
@@ -30,9 +51,18 @@ class GeminiService:
         self.client = genai.Client(api_key=api_key)
         self.model = "gemini-2.5-flash"
 
+    def _is_transient_error(self, error: Exception) -> bool:
+        """一時的（リトライで回復しうる）なエラーかを判定する（503/429/混雑等）"""
+        msg = str(error).lower()
+        return any(keyword in msg for keyword in _TRANSIENT_ERROR_KEYWORDS)
+
     def _generate(self, prompt: str, failure_message: str) -> str:
         """
         プロンプトをGeminiに渡してテキストを生成する共通処理
+
+        gemini-2.5-flash は混雑時に 503 UNAVAILABLE を断続的に返すため、
+        一時的なエラーのときだけ指数バックオフで最大 _MAX_RETRIES 回リトライする。
+        恒久的なエラー（無効リクエスト等）は即座に失敗メッセージを返す。
 
         Args:
             prompt: Geminiに渡すプロンプト
@@ -42,14 +72,29 @@ class GeminiService:
         Returns:
             生成されたテキスト。失敗時は failure_message を含むエラーテキスト
         """
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-            )
-            return response.text
-        except Exception as e:
-            return f"{failure_message}: {str(e)}"
+        last_error: Optional[Exception] = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                )
+                return response.text
+            except Exception as e:
+                last_error = e
+                # 一時的でないエラー、または最終試行なら即座に終了
+                if not self._is_transient_error(e) or attempt == _MAX_RETRIES - 1:
+                    break
+                # 指数バックオフで待機してから再試行（1s, 2s, 4s）
+                wait = _BACKOFF_BASE_SECONDS * (2 ** attempt)
+                logger.warning(
+                    "[Gemini] 一時的エラー（%d/%d回目）: %s。%.1f秒後に再試行",
+                    attempt + 1, _MAX_RETRIES, str(e), wait,
+                )
+                time.sleep(wait)
+
+        logger.error("[Gemini] 生成失敗: %s", str(last_error))
+        return f"{failure_message}: {str(last_error)}"
 
     async def generate_song_analysis(
         self,

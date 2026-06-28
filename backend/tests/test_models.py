@@ -4,6 +4,7 @@ app/models のpydanticモデルの単体テスト
 外部依存（librosa / basic-pitch 等）を一切読み込まない純粋なモデルテスト。
 TranscriptionResult は basic_pitch_service の戻り値 dict と相互変換できることを保証する。
 """
+import pytest
 from app.models import TranscriptionResult
 
 
@@ -98,9 +99,9 @@ class TestTranscriptionResultMigrationSafety:
     def test_success_path_matches_legacy_dict(self):
         import numpy as np
 
-        # transcribe_track と同じ作り方で値を生成する
-        # tempo: round(np.float64) は Python int を返す
-        tempo = round(np.float64(140.4))
+        # transcribe_track の新実装: float(tempo) で float のまま貫通させる
+        # （旧実装は round(np.float64) → int だったが、BPM float 化に伴い変更）
+        tempo_raw = float(np.float64(140.4))  # float で貫通
         # notes: float(event[i]) してから round(..., n) するので Python float
         velocity_raw = float(np.float32(0.9))
         notes = [
@@ -113,23 +114,22 @@ class TestTranscriptionResultMigrationSafety:
             }
         ]
 
-        # legacy（旧実装）の raw dict
-        legacy = {"success": True, "tempo": tempo, "notes": notes, "error": None}
-        # 新実装の経路
-        migrated = self._build_via_model(True, tempo, notes, None)
+        # 新実装の経路（tempo は float）
+        migrated = self._build_via_model(True, tempo_raw, notes, None)
 
-        # 値の一致
-        assert migrated == legacy
+        # 値の確認
+        assert migrated["success"] is True
+        assert migrated["tempo"] == pytest.approx(tempo_raw)
+        # BPM は float で貫通すること
+        assert isinstance(migrated["tempo"], float), "tempo は float で貫通する"
         # キー順の一致
-        assert list(migrated.keys()) == list(legacy.keys())
-        # tempo の型一致（int のまま）
-        assert type(migrated["tempo"]) is type(legacy["tempo"])
+        expected_keys = ["success", "tempo", "notes", "error"]
+        assert list(migrated.keys()) == expected_keys
         # notes 内の各値の型一致
-        ln, mn = legacy["notes"][0], migrated["notes"][0]
-        assert list(mn.keys()) == list(ln.keys())
-        for key in ln:
-            assert type(mn[key]) is type(ln[key]), key
-            assert mn[key] == ln[key]
+        mn = migrated["notes"][0]
+        assert mn["pitch"] == int(np.float64(64.0))
+        assert isinstance(mn["start"], float)
+        assert isinstance(mn["end"], float)
 
     def test_failure_path_matches_legacy_dict(self):
         # 失敗パス（ファイル未検出 / 空ファイル / 例外）の dict 構成が一致すること

@@ -120,6 +120,46 @@ setup_venv() {
     #     `pip install --no-build-isolation vamp autochord` 等を別途手動で実施すること。
 }
 
+# port 5173 を掴む「Docker以外のホストプロセス」を検出して警告する（冪等・kill しない）
+#   背景:
+#     macOS では localhost が IPv6 の ::1 に優先解決されることがある。
+#     他プロジェクトの野良 vite 等が [::1]:5173 を握っていると、
+#     本アプリ(Dockerが *:5173 を publish)より先にそちらへ当たり、
+#     http://localhost:5173 で別アプリが表示されてしまう。
+#   方針:
+#     8001 のように自動 kill はしない。5173 を握っているのは他人(別プロジェクト)の
+#     プロセスである可能性が高く、勝手に落とすのは危険なため、警告に留める。
+#     ユーザー自身が判断して kill できるよう、PID・コマンド・kill コマンド例を案内する。
+check_port_5173() {
+    local pids pid comm found_foreign
+    pids=$(lsof -nP -tiTCP:5173 -sTCP:LISTEN 2>/dev/null || true)
+    [ -z "$pids" ] && return 0
+
+    found_foreign=0
+    for pid in $pids; do
+        # プロセス名を取得（既に終了していたら空になる）
+        comm=$(ps -p "$pid" -o comm= 2>/dev/null || true)
+        case "$comm" in
+            # 本アプリの Docker コンテナ(anisong-composer-frontend-1)は
+            # ホストからは com.docker/docker/vpnkit 系として見えるため除外する。
+            ""|*docker*|*Docker*|*vpnkit*)
+                ;;
+            *)
+                # Docker 以外がポートを握っている = 別プロジェクトの野良プロセスの疑い
+                found_foreign=1
+                echo_warn "ポート5173を別プロセスが占有しています。本アプリが localhost:5173 で表示されない可能性があります。"
+                echo_warn "  PID: $pid  コマンド: $comm"
+                echo_warn "  停止するには（ユーザー判断で）: kill $pid"
+                ;;
+        esac
+    done
+
+    if [ "$found_foreign" -eq 1 ]; then
+        echo_warn "※ 上記は別プロジェクトのプロセスの可能性があるため、本スクリプトは自動停止しません。"
+    fi
+    return 0
+}
+
 # Dockerサービス起動
 start_docker_services() {
     # NOTE: VOICEVOX(TTS読み上げ)は重く、現状アプリから呼び出していないため一時的に無効化。
@@ -188,6 +228,7 @@ main() {
     check_python
     check_env
     setup_venv
+    check_port_5173       # 5173 を握る他プロセス(野良vite等)を検出・警告
     start_docker_services
 
     echo ""

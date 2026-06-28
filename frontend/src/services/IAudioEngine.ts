@@ -33,7 +33,12 @@ export interface IAudioEngine {
   init(): Promise<void>
 
   /**
-   * 4トラックの解析結果を再生
+   * 4〜6トラックの解析結果を再生（htdemucs_6s 対応）
+   *
+   * htdemucs_6s の guitar/keyboard（piano）stem に対応するため
+   * guitar/keyboard フィールドを追加（optional）。
+   * 後方互換: drums/bass/other/melody は引き続き使用可能。
+   *
    * @param startFrom 開始位置（秒）
    */
   play4TrackAnalysis(
@@ -42,6 +47,8 @@ export interface IAudioEngine {
       bass?: Array<{ pitch: number; start: number; end: number }>
       other?: Array<{ pitch: number; start: number; end: number }>
       melody?: Array<{ pitch: number; start: number; end: number }>
+      guitar?: Array<{ pitch: number; start: number; end: number }>    // htdemucs_6s 追加
+      keyboard?: Array<{ pitch: number; start: number; end: number }>  // htdemucs_6s 追加（piano stem）
     },
     mutedTracks?: Set<string>,
     onProgress?: (time: number) => void,

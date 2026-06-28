@@ -4,12 +4,16 @@
  * 4トラック（ドラム、ベース、キーボード、ギター）の再生を管理
  * - ドラム: サンプル音源
  * - ベース/キーボード/ギター: SoundFont (GM音源)
+ * - メロディ: sfPiano（acoustic_grand_piano）を流用して再生
+ *   （声系音源 sfVoice/choir_aahs は廃止済み）
  */
 import * as Tone from 'tone'
 import Soundfont, { Player as SoundfontPlayer } from 'soundfont-player'
 import { Track, TrackType, Note } from '../types/music'
 // ドラムの再生用MIDIマッピングとサンプルURL（単一モジュールへ集約済み）
 import { DRUM_MAP, DRUM_SAMPLE_URLS } from '../constants/drumKit'
+// SoundFont 楽器定数（音色名・ゲイン）
+import { SF_INSTRUMENTS, SF_GAINS } from '../constants/instruments'
 
 // triggerAttackRelease に渡しうる引数の型（音名/周波数=string|number、末尾 time=number、省略=undefined）
 type TriggerArg = string | number | undefined
@@ -30,8 +34,9 @@ class AudioEngine {
 
   // SoundFont楽器（GM音源）
   private sfBass: SoundfontPlayer | null = null
-  private sfPiano: SoundfontPlayer | null = null
+  private sfPiano: SoundfontPlayer | null = null  // melody も sfPiano を流用
   private sfGuitar: SoundfontPlayer | null = null
+  // ※ sfVoice（choir_aahs）は廃止済み。melody は sfPiano で再生する。
 
   // シンセ楽器（フォールバック用）
   private kick: Tone.MembraneSynth | null = null
@@ -181,28 +186,29 @@ class AudioEngine {
 
       console.log('Loading SoundFont instruments...')
 
-      // 並列でロード
+      // 並列でロード（音色名・ゲインは constants/instruments.ts から参照）
+      // melody は sfPiano を流用するため、ロードは bass/piano/guitar の3音源のみ
       const [bass, piano, guitar] = await Promise.all([
-        Soundfont.instrument(this.audioContext, 'electric_bass_finger', {
+        Soundfont.instrument(this.audioContext, SF_INSTRUMENTS.bass, {
           soundfont: 'MusyngKite',
-          gain: 2.0, // ベースは少し大きめに
+          gain: SF_GAINS.bass,
         }),
-        Soundfont.instrument(this.audioContext, 'acoustic_grand_piano', {
+        Soundfont.instrument(this.audioContext, SF_INSTRUMENTS.piano, {
           soundfont: 'MusyngKite',
-          gain: 1.5,
+          gain: SF_GAINS.piano,
         }),
-        Soundfont.instrument(this.audioContext, 'electric_guitar_clean', {
+        Soundfont.instrument(this.audioContext, SF_INSTRUMENTS.guitar, {
           soundfont: 'MusyngKite',
-          gain: 1.5,
+          gain: SF_GAINS.guitar,
         }),
       ])
 
       this.sfBass = bass
-      this.sfPiano = piano
+      this.sfPiano = piano  // melody も sfPiano を流用
       this.sfGuitar = guitar
       this.soundfontsLoaded = true
 
-      console.log('SoundFont instruments loaded: bass, piano, guitar')
+      console.log('SoundFont instruments loaded: bass, piano(melody共用), guitar')
     } catch (err) {
       console.warn('Failed to load SoundFont instruments, using synth fallback:', err)
       this.soundfontsLoaded = false
@@ -253,23 +259,23 @@ class AudioEngine {
   }
 
   /**
-   * 旋律系トラック（bass/keyboard/guitar）の1音を再生する共通ヘルパー。
+   * 旋律系トラック（bass/keyboard/guitar/melody）の1音を再生する共通ヘルパー。
    *
    * 即時再生（time なし）とスケジュール再生（time あり）の両方を一本化する。
    * - SoundFont が使える場合: sfXxx.play(note, time, { duration })
    *   ※ time=undefined のときは即時版と同じく第2引数が undefined になる。
    * - フォールバック（シンセ）の場合: synth.triggerAttackRelease(...)
-   *   ※ bass/guitar は freq、keyboard は note を渡す（現状の使い分けを厳密に維持）。
+   *   ※ bass/guitar は freq、keyboard/melody は note を渡す。
    *   ※ time が undefined のときは末尾 time を付けず2引数で呼ぶ（即時版と完全一致）。
    *
-   * @param trackType 旋律系トラック種別
+   * @param trackType 旋律系トラック種別（melody=sfPiano / フォールバックは keyboard）
    * @param freq      MIDI から変換した周波数（bass/guitar 用）
-   * @param note      MIDI から変換した音名（soundfont / keyboard 用）
+   * @param note      MIDI から変換した音名（soundfont / keyboard / melody 用）
    * @param duration  発音長（秒）
    * @param time      スケジュール時刻（即時再生では undefined）
    */
   private playInstrument(
-    trackType: 'bass' | 'keyboard' | 'guitar',
+    trackType: 'bass' | 'keyboard' | 'guitar' | 'melody',
     freq: number,
     note: string,
     duration: number,
@@ -278,7 +284,14 @@ class AudioEngine {
     // 楽器ごとの「SoundFontプレイヤー」と「フォールバックシンセ + シンセに渡す値」を引く
     const sf = this.instrumentSoundfont(trackType)
     if (this.soundfontsLoaded && sf) {
-      sf.play(note, time, { duration })
+      // melody は sfPiano(piano gain=1.5)を流用しているため、主旋律として
+      // 少し大きく鳴らすよう、ノート単位の相対ゲイン(melody/piano)を掛ける。
+      // 他トラックは追加ゲイン無し（ロード時の gain のまま）。
+      const playOpts: { duration: number; gain?: number } = { duration }
+      if (trackType === 'melody') {
+        playOpts.gain = SF_GAINS.melody / SF_GAINS.piano
+      }
+      sf.play(note, time, playOpts)
       return
     }
 
@@ -294,9 +307,11 @@ class AudioEngine {
 
   /**
    * 旋律系トラックに対応する SoundFont プレイヤーを返す。
+   * melody は sfPiano（acoustic_grand_piano）を流用する。
+   * （sfVoice/choir_aahs は廃止済み）
    */
   private instrumentSoundfont(
-    trackType: 'bass' | 'keyboard' | 'guitar'
+    trackType: 'bass' | 'keyboard' | 'guitar' | 'melody'
   ): SoundfontPlayer | null {
     switch (trackType) {
       case 'bass':
@@ -305,15 +320,19 @@ class AudioEngine {
         return this.sfPiano
       case 'guitar':
         return this.sfGuitar
+      case 'melody':
+        // メロディは sfPiano（acoustic_grand_piano）を流用する（声系音源廃止）
+        return this.sfPiano
     }
   }
 
   /**
    * 旋律系トラックに対応するフォールバックシンセと、それに渡す値（freq か note）を返す。
-   * bass/guitar は freq、keyboard は note を使う（現状の使い分けを厳密に維持）。
+   * bass/guitar は freq、keyboard/melody は note を使う。
+   * melody は sfPiano ロード失敗時に keyboard シンセへフォールバックする。
    */
   private instrumentSynth(
-    trackType: 'bass' | 'keyboard' | 'guitar',
+    trackType: 'bass' | 'keyboard' | 'guitar' | 'melody',
     freq: number,
     note: string
   ): { synth: TriggerSynth | null; value: number | string } {
@@ -324,6 +343,9 @@ class AudioEngine {
         return { synth: this.keyboard as TriggerSynth | null, value: note }
       case 'guitar':
         return { synth: this.guitar as TriggerSynth | null, value: freq }
+      case 'melody':
+        // sfPiano ロード失敗時はキーボードシンセにフォールバック（note を渡す）
+        return { synth: this.keyboard as TriggerSynth | null, value: note }
     }
   }
 
@@ -612,7 +634,15 @@ class AudioEngine {
   }
 
   /**
-   * 4トラックの解析結果を再生（melody追加）
+   * 4〜6トラックの解析結果を再生（htdemucs_6s 対応: guitar/keyboard 追加）
+   *
+   * 音源マッピング（設計書 B-4）:
+   *   guitar   → sfGuitar（サウンドフォント）/ guitar シンセ（フォールバック）
+   *   keyboard → sfPiano（サウンドフォント）/ keyboard シンセ（フォールバック）
+   *   other    → sfGuitar（後方互換）
+   *   melody   → sfPiano（ピアノ音源流用）/ keyboard シンセ（フォールバック）
+   *              ※ 声系音源（sfVoice/choir_aahs）は廃止済み
+   *
    * @param startFrom 開始位置（秒）- 指定した位置から再生開始
    */
   play4TrackAnalysis(
@@ -621,6 +651,8 @@ class AudioEngine {
       bass?: Array<{ pitch: number; start: number; end: number }>;
       other?: Array<{ pitch: number; start: number; end: number }>;
       melody?: Array<{ pitch: number; start: number; end: number }>;
+      guitar?: Array<{ pitch: number; start: number; end: number }>;    // htdemucs_6s 追加
+      keyboard?: Array<{ pitch: number; start: number; end: number }>;  // htdemucs_6s 追加（piano stem）
     },
     mutedTracks: Set<string> = new Set(),
     onProgress?: (time: number) => void,
@@ -637,9 +669,10 @@ class AudioEngine {
     transport.bpm.value = 60
 
     // 各トラックのノートをスケジュール（startFromより後のノートのみ）
+    // htdemucs_6s 対応: guitar/keyboard を追加（設計書 B-4）
     const scheduleTrack = (
       notes: Array<{ pitch: number; start: number; end: number }> | undefined,
-      trackType: 'drums' | 'bass' | 'other' | 'melody'
+      trackType: 'drums' | 'bass' | 'other' | 'melody' | 'guitar' | 'keyboard'
     ) => {
       if (!notes || mutedTracks.has(trackType)) return
 
@@ -664,9 +697,8 @@ class AudioEngine {
               this.playInstrument('bass', freq, noteName, duration, time)
               break
             case 'other':
-              // other（ギター/キーボード）はギター音源で再生（sfGuitar）、
-              // フォールバックは keyboard(note)。これは playInstrument のどの
-              // トラック対応とも一致しない独自の組み合わせのため、ここに残す。
+              // other（後方互換）はギター音源で再生（sfGuitar）
+              // フォールバックは keyboard(note)
               if (this.soundfontsLoaded && this.sfGuitar) {
                 this.sfGuitar.play(noteName, time, { duration })
               } else {
@@ -674,7 +706,17 @@ class AudioEngine {
               }
               break
             case 'melody':
-              // メロディはピアノ音源で再生。sfPiano / keyboard(note) → 'keyboard' と完全一致
+              // メロディ = sfPiano（acoustic_grand_piano）で再生（声系音源廃止）。
+              // sfPiano ロード失敗時は keyboard シンセにフォールバック（playInstrument ヘルパー内で処理）
+              this.playInstrument('melody', freq, noteName, duration, time)
+              break
+            case 'guitar':
+              // htdemucs_6s guitar stem → sfGuitar で再生（設計書 B-4）
+              this.playInstrument('guitar', freq, noteName, duration, time)
+              break
+            case 'keyboard':
+              // htdemucs_6s piano stem → sfPiano で再生（設計書 B-4）
+              // playInstrument の 'keyboard' case は sfPiano を使用
               this.playInstrument('keyboard', freq, noteName, duration, time)
               break
           }
@@ -688,6 +730,9 @@ class AudioEngine {
     scheduleTrack(tracks.bass, 'bass')
     scheduleTrack(tracks.other, 'other')
     scheduleTrack(tracks.melody, 'melody')
+    // htdemucs_6s 追加 stem（設計書 B-4）
+    scheduleTrack(tracks.guitar, 'guitar')
+    scheduleTrack(tracks.keyboard, 'keyboard')
 
     // 進捗コールバック（startFromを加算して実際の時間を返す）
     let progressInterval: number | null = null
@@ -699,12 +744,14 @@ class AudioEngine {
       }, 50)
     }
 
-    // 曲の終わりを検出
+    // 曲の終わりを検出（htdemucs_6s 追加 stem も含める）
     const allNotes = [
-      ...(tracks.drums || []),
-      ...(tracks.bass || []),
-      ...(tracks.other || []),
-      ...(tracks.melody || []),
+      ...(tracks.drums    || []),
+      ...(tracks.bass     || []),
+      ...(tracks.other    || []),
+      ...(tracks.melody   || []),
+      ...(tracks.guitar   || []),  // htdemucs_6s 追加
+      ...(tracks.keyboard || []),  // htdemucs_6s 追加
     ]
     const maxTime = allNotes.length > 0 ? Math.max(...allNotes.map((n) => n.end)) - startFrom + 1 : 0
 
@@ -751,7 +798,8 @@ class AudioEngine {
     this.drumSampler?.dispose()
     this.drumSamplesLoaded = false
 
-    // SoundFont楽器
+    // SoundFont楽器（メモリリーク防止: stop() 後 null 化）
+    // melody は sfPiano を流用しているため、sfPiano の解放のみで十分
     this.sfBass?.stop()
     this.sfPiano?.stop()
     this.sfGuitar?.stop()
