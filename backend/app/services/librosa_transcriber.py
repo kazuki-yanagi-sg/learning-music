@@ -722,10 +722,13 @@ class LibrosaTranscriber:
             voiced_count = np.sum(voiced_flag) if voiced_flag is not None else 0
             logger.debug(f"[Librosa] Total frames: {len(f0)}, voiced frames: {voiced_count}")
 
-            # ピッチをノートに変換
-            notes = self._f0_to_notes(f0, voiced_flag, voiced_probs, times, tempo)
+            # ピッチをノートに変換（offset を配線し、量子化時に offset を原点として扱う）
+            notes = self._f0_to_notes(f0, voiced_flag, voiced_probs, times, tempo, offset)
 
             # オフセット補正（第1拍を原点に揃える）
+            # _finalize_note 内の quantize_to_grid は offset をグリッド原点として
+            # 量子化するが絶対時刻のまま返す（extract_drums と同じパターン）ため、
+            # ここで一度だけ offset を差し引いて相対時刻に変換する。
             if offset != 0.0:
                 notes = apply_offset_to_notes(notes, offset)
 
@@ -751,11 +754,16 @@ class LibrosaTranscriber:
         voiced_flag: np.ndarray,
         voiced_probs: np.ndarray,
         times: np.ndarray,
-        tempo: float = None
+        tempo: float = None,
+        offset: float = 0.0,
     ) -> list[dict]:
         """
         連続ピッチデータをノートイベントに変換
         ビブラート許容・ギャップブリッジ対応
+
+        Args:
+            offset: 第1拍の絶対時刻（秒）。_finalize_note の量子化グリッド原点として使う
+                    （量子化の前に一度だけ適用する単一契約）。
         """
         notes = []
 
@@ -788,7 +796,7 @@ class LibrosaTranscriber:
                         # ギャップが長すぎる - ノートを終了
                         note = self._finalize_note(
                             current_note, current_start, current_end,
-                            current_pitches, current_probs, tempo
+                            current_pitches, current_probs, tempo, offset
                         )
                         if note:
                             notes.append(note)
@@ -819,7 +827,7 @@ class LibrosaTranscriber:
                     # 新しいノートに変わった
                     note = self._finalize_note(
                         current_note, current_start, current_end,
-                        current_pitches, current_probs, tempo
+                        current_pitches, current_probs, tempo, offset
                     )
                     if note:
                         notes.append(note)
@@ -834,7 +842,7 @@ class LibrosaTranscriber:
         if current_note is not None and len(current_pitches) > 0:
             note = self._finalize_note(
                 current_note, current_start, current_end or times[-1],
-                current_pitches, current_probs, tempo
+                current_pitches, current_probs, tempo, offset
             )
             if note:
                 notes.append(note)
@@ -868,9 +876,15 @@ class LibrosaTranscriber:
         end: float,
         pitches: list[float],
         probs: list[float],
-        tempo: float = None
+        tempo: float = None,
+        offset: float = 0.0,
     ) -> Optional[dict]:
-        """ノートを確定"""
+        """ノートを確定
+
+        Args:
+            offset: 第1拍の絶対時刻（秒）。quantize_to_grid で offset をグリッド原点として
+                    量子化する（単一契約: 量子化の前に一度だけ適用。extract_drums と同じパターン）。
+        """
         duration = end - start
         if duration < self.min_note_duration:
             return None
@@ -879,12 +893,13 @@ class LibrosaTranscriber:
         avg_pitch = round(np.mean(pitches)) if pitches else pitch
         avg_confidence = np.mean(probs) if probs else 0.5
 
-        # クオンタイズ
+        # クオンタイズ（offset をグリッド原点として量子化する。quantize_to_grid は
+        # 絶対時刻のまま返すため、呼び出し元 extract_melody で一度だけ offset を差し引く）
         if tempo and tempo > 0:
             beat_duration = 60.0 / tempo
             grid = beat_duration * 0.25  # 16分音符
-            start = round(start / grid) * grid
-            end = round(end / grid) * grid
+            start = quantize_to_grid(start, grid, offset)
+            end = quantize_to_grid(end, grid, offset)
             if end <= start:
                 end = start + grid
 

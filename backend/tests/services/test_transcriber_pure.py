@@ -5,6 +5,7 @@ librosa / basic-pitch / torch といった重い外部依存を読み込まず�
 副作用のない変換ロジックだけを対象にした安全網。
 （重い依存は各サービスで遅延 import されるため、ここでは未インストールでも動く）
 """
+import pytest
 import app.services.basic_pitch_service as bp_mod
 from app.services.basic_pitch_service import BasicPitchService
 
@@ -181,6 +182,89 @@ import pytest as _pytest  # noqa: E402
 TestLibrosaTranscriberExtractMelodyBehavior = _pytest.mark.integration(
     TestLibrosaTranscriberExtractMelodyBehavior
 )
+
+
+class TestFinalizeNoteOffsetQuantize:
+    """LibrosaTranscriber._finalize_note の offset-aware 量子化テスト
+
+    単一契約: offset は量子化の前に一度だけ適用する（quantize_to_grid を使用）。
+    _finalize_note に offset を配線し、extract_drums と同じ「quantize_to_grid で
+    offset をグリッド原点として量子化する」パターンに統一する。
+
+    境界ケース:
+      - offset=0: 従来どおりの量子化結果と一致する
+      - offset>0: グリッドの非整数倍でも offset を原点として正しくスナップする
+      - グリッド境界ちょうど: ぴったりの値はそのまま保持される
+      - 負値にならない: offset > start でも 0 未満にならない
+    """
+
+    def setup_method(self):
+        from app.services.librosa_transcriber import LibrosaTranscriber
+        self.t = LibrosaTranscriber()
+
+    def _finalize(self, start, end, tempo, offset=0.0, pitch=60):
+        return self.t._finalize_note(
+            pitch=pitch, start=start, end=end,
+            pitches=[float(pitch)], probs=[0.8],
+            tempo=tempo, offset=offset,
+        )
+
+    def test_offset_zero_matches_plain_quantize(self):
+        """offset=0 は素の round(t/grid)*grid と一致する"""
+        tempo = 150.0
+        grid = 60.0 / tempo * 0.25  # 0.1s
+        note = self._finalize(start=0.42, end=0.42 + 0.2, tempo=tempo, offset=0.0)
+
+        assert note is not None
+        assert note["start"] == pytest.approx(round(0.42 / grid) * grid, abs=1e-6)
+
+    def test_offset_positive_uses_offset_as_grid_anchor(self):
+        """offset>0 のとき、offset を原点としたグリッドにスナップする
+
+        BPM=150, grid=0.1s, start=0.42, offset=0.07 のとき
+        正しい値: round((0.42-0.07)/0.1)*0.1 + 0.07 = 0.30 + 0.07 = 0.37
+        誤った値（offset無視の量子化）: round(0.42/0.1)*0.1 = 0.40
+        """
+        tempo = 150.0
+        offset = 0.07
+        note = self._finalize(start=0.42, end=0.42 + 0.2, tempo=tempo, offset=offset)
+
+        assert note is not None
+        expected = round((0.42 - offset) / 0.1) * 0.1 + offset
+        wrong = round(0.42 / 0.1) * 0.1
+        assert note["start"] == pytest.approx(expected, abs=1e-6)
+        assert note["start"] != pytest.approx(wrong, abs=1e-6)
+
+    def test_grid_boundary_exact_value_kept(self):
+        """offset を引いた後の値がちょうどグリッド境界なら、その値のまま保持される"""
+        tempo = 150.0  # grid = 0.1s
+        offset = 0.05
+        # (start - offset) = 0.2 ちょうど（グリッド整数倍）
+        start = 0.25
+        note = self._finalize(start=start, end=start + 0.2, tempo=tempo, offset=offset)
+
+        assert note is not None
+        # round((0.25-0.05)/0.1)*0.1 + 0.05 = round(2.0)*0.1+0.05 = 0.2+0.05 = 0.25
+        assert note["start"] == pytest.approx(0.25, abs=1e-6)
+
+    def test_does_not_go_negative_when_offset_exceeds_start(self):
+        """offset > start でも量子化結果が負値にならない"""
+        tempo = 150.0
+        offset = 1.0
+        note = self._finalize(start=0.05, end=0.05 + 0.2, tempo=tempo, offset=offset)
+
+        assert note is not None
+        assert note["start"] >= 0.0
+
+    def test_end_after_start_when_quantized_equal(self):
+        """量子化後に end <= start になった場合、grid 分だけ end を延長する"""
+        tempo = 150.0
+        offset = 0.0
+        # start と end が同じグリッドにスナップされるケース
+        note = self._finalize(start=0.41, end=0.43, tempo=tempo, offset=offset)
+
+        assert note is not None
+        assert note["end"] > note["start"]
 
 
 class TestBasicPitchTrackParamsGuitar:

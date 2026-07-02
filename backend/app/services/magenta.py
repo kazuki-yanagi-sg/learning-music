@@ -335,24 +335,16 @@ class MagentaService:
 
             # 3. 各トラックを「楽器に適した変換器」でMIDI変換
             tracks = {}
-            # apply_offset_to_notes は librosa_transcriber で定義された純関数
-            from app.services.librosa_transcriber import apply_offset_to_notes
 
             for track_type, track_path in separated_tracks.items():
                 # 確定ルール（CLAUDE.md:189）: メロディの音源はボーカル(vocals stem)。
                 # vocals は melody として処理する（スキップしない）。
                 logger.info(f"[Magenta] Processing {track_type} track: {track_path}")
 
-                # トラック種別ごとに最適な変換器を選ぶ。
-                # offset は _transcribe_track には渡さず（二重適用防止）、
-                # audio_to_4tracks レベルで apply_offset_to_notes を一元適用する。
-                result = self._transcribe_track(track_type, track_path, tempo, offset=0.0)
-
-                # 第1拍オフセット補正: 全トラックのノートを グリッド原点に揃える
-                # apply_offset_to_notes は純関数（元のリストを変更しない）
-                if result["success"] and offset != 0.0:
-                    result = dict(result)  # 元の dict を変更しない（シャローコピー）
-                    result["notes"] = apply_offset_to_notes(result["notes"], offset)
+                # 単一契約: offset は各トランスクライバー内で量子化の前に一度だけ
+                # 適用する。呼び出し側（ここ）は real offset を渡すだけで、
+                # 後段で再適用（apply_offset_to_notes 等）しない（二重適用防止）。
+                result = self._transcribe_track(track_type, track_path, tempo, offset=offset)
 
                 logger.info(
                     f"[Magenta] {track_type} result: success={result['success']}, "

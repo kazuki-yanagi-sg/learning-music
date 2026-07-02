@@ -414,6 +414,8 @@ class BasicPitchService:
             audio_path: 分離された音声ファイルのパス
             track_type: トラック種別（"drums", "bass", "other", "vocals"）
             tempo: テンポ（BPM）- Noneの場合は検出する
+            offset: 第1拍のオフセット（秒）。クオンタイズ前に各ノートの時刻から差し引く
+                    （単一契約: 量子化の前に一度だけ適用。呼び出し側で再適用しない）。
 
         Returns:
             {
@@ -495,6 +497,13 @@ class BasicPitchService:
                     # ドラムノートをGM Drumマップに正規化
                     pitch = self._normalize_drum_pitch(pitch)
 
+                # オフセット補正（第1拍を原点に揃える）→ クオンタイズ前に一度だけ適用する
+                # 単一契約: offset は量子化の前に一度だけ適用する（後段で再適用しない）。
+                if offset != 0.0:
+                    from app.services.librosa_transcriber import apply_offset as _apply_offset
+                    start_time = _apply_offset(start_time, offset)
+                    end_time = _apply_offset(end_time, offset)
+
                 # クオンタイズ
                 if tempo > 0:
                     resolution = 0.125 if track_type == "drums" else 0.25  # ドラムは32分音符
@@ -536,11 +545,6 @@ class BasicPitchService:
                 )
             else:
                 logger.info(f"[BasicPitch] {track_type}: {len(notes)} notes (filtered {filtered_count})")
-
-            # オフセット補正（第1拍を原点に揃える）
-            if offset != 0.0:
-                from app.services.librosa_transcriber import apply_offset_to_notes
-                notes = apply_offset_to_notes(notes, offset)
 
             return TranscriptionResult(
                 success=True,

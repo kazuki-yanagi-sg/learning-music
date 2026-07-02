@@ -862,11 +862,17 @@ class TestAudioTo4TracksFloatTempo:
     def test_audio_to_4tracks_applies_offset_to_result_notes(
         self, mock_get_basic_pitch, mock_get_librosa, mock_get_separator
     ):
-        """detect_tempo が offset=0.8 を返すとき最終ノートが offset で補正される
+        """detect_tempo が offset=0.8 を返すとき、real offset が各変換器に配線される
 
-        設計書 §配線2(b): audio_to_4tracks レベルで apply_offset_to_notes を一元適用。
-        変換器（モック）が raw ノート（start=0.8）を返すとき、
-        最終結果は start≈0.0（=0.8-0.8）になる。
+        単一契約（設計屋定義。旧・設計書 §配線2(b) を置き換え）:
+          「offset は各トランスクライバー内で量子化の前に一度だけ適用する。
+           呼び出し側(audio_to_4tracks)は offset を渡すだけで、
+           後段で再適用（apply_offset_to_notes 等）しない。」
+
+        よって:
+          - extract_drums / extract_melody / transcribe_track が real offset=0.8 で呼ばれる
+            （0.0 で呼んで後段シフトするのは誤り）
+          - 変換器（モック）が返したノート（既に offset 適用済みの想定）はそのまま結果へ通る
         """
         from app.services.magenta import MagentaService
         from app.models.transcription import TempoInfo
@@ -879,21 +885,21 @@ class TestAudioTo4TracksFloatTempo:
         mock_librosa.detect_tempo.return_value = TempoInfo(
             tempo=160.0, beat_times=[0.8, 1.175], offset=0.8
         )
-        # raw ノート（offset 未適用）を返す
-        raw_note = {"pitch": 60, "start": 0.8, "end": 1.2, "velocity": 80}
+        # 変換器はすでに offset 適用済みのノート（start=0.0）を返す前提
+        applied_note = {"pitch": 60, "start": 0.0, "end": 0.4, "velocity": 80}
         mock_librosa.extract_drums.return_value = {
             "success": True,
-            "notes": [{"pitch": 36, "start": 0.8, "end": 0.85, "velocity": 80, "drum_type": "kick"}],
+            "notes": [{"pitch": 36, "start": 0.0, "end": 0.05, "velocity": 80, "drum_type": "kick"}],
             "error": None,
         }
         mock_librosa.extract_melody.return_value = {
-            "success": True, "notes": [dict(raw_note)], "error": None,
+            "success": True, "notes": [dict(applied_note)], "error": None,
         }
         mock_get_librosa.return_value = mock_librosa
 
         mock_basic_pitch = Mock()
         mock_basic_pitch.transcribe_track.return_value = {
-            "success": True, "notes": [dict(raw_note)], "error": None,
+            "success": True, "notes": [dict(applied_note)], "error": None,
         }
         mock_get_basic_pitch.return_value = mock_basic_pitch
 
@@ -907,20 +913,31 @@ class TestAudioTo4TracksFloatTempo:
 
             assert result["success"] is True
 
-            # bass ノートが offset=0.8 で補正されているか（raw start=0.8 → 0.0）
+            # real offset(=0.8) が各変換器に渡っているか（0.0 で呼ばれてはいけない）
+            drums_call = mock_librosa.extract_drums.call_args
+            assert drums_call.kwargs.get("offset") == pytest.approx(0.8), (
+                f"extract_drums に real offset=0.8 が渡っていない: {drums_call.kwargs}"
+            )
+            melody_call = mock_librosa.extract_melody.call_args
+            assert melody_call.kwargs.get("offset") == pytest.approx(0.8), (
+                f"extract_melody に real offset=0.8 が渡っていない: {melody_call.kwargs}"
+            )
+            for c in mock_basic_pitch.transcribe_track.call_args_list:
+                assert c.kwargs.get("offset") == pytest.approx(0.8), (
+                    f"transcribe_track に real offset=0.8 が渡っていない: {c.kwargs}"
+                )
+
+            # 変換器が返したノートがそのまま通る（後段で再シフトされない）
             bass_notes = result["tracks"].get("bass", {}).get("notes", [])
             assert len(bass_notes) >= 1, "bass ノートが空"
-            assert bass_notes[0]["start"] == pytest.approx(0.0, abs=0.01), (
-                f"bass notes[0]['start']={bass_notes[0]['start']} "
-                f"(expected ≈0.0 = raw 0.8 - offset 0.8)"
+            assert bass_notes[0]["start"] == pytest.approx(0.0, abs=1e-9), (
+                f"後段で offset が再適用され二重シフトしている: {bass_notes[0]['start']}"
             )
 
-            # drums ノートが offset=0.8 で補正されているか（raw start=0.8 → 0.0）
             drums_notes = result["tracks"].get("drums", {}).get("notes", [])
             assert len(drums_notes) >= 1, "drums ノートが空"
-            assert drums_notes[0]["start"] == pytest.approx(0.0, abs=0.01), (
-                f"drums notes[0]['start']={drums_notes[0]['start']} "
-                f"(expected ≈0.0 = raw 0.8 - offset 0.8)"
+            assert drums_notes[0]["start"] == pytest.approx(0.0, abs=1e-9), (
+                f"後段で offset が再適用され二重シフトしている: {drums_notes[0]['start']}"
             )
         finally:
             os.unlink(audio_path)
