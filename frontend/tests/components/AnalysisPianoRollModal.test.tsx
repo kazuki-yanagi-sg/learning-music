@@ -21,11 +21,12 @@ import { AnalysisPianoRollModal } from '../../src/components/AnalysisPianoRollMo
 import type { FourTrackResult, AnalysisResult, NoteInfo } from '../../src/services/songAnalysisApi'
 
 // --- モック関数を vi.hoisted で先に定義（vi.mock は先頭へ巻き上げられるため） ---
-const { initMock, play4TrackMock, playNotesMock, explainSectionMock } = vi.hoisted(() => ({
+const { initMock, play4TrackMock, playNotesMock, explainSectionMock, setVolumeMock } = vi.hoisted(() => ({
   initMock: vi.fn().mockResolvedValue(undefined),
   play4TrackMock: vi.fn(() => ({ stop: vi.fn(), seek: vi.fn() })),
   playNotesMock: vi.fn(() => ({ stop: vi.fn() })),
   explainSectionMock: vi.fn(),
+  setVolumeMock: vi.fn(),
 }))
 
 // --- audioEngine（シングルトン）をモック ---
@@ -35,6 +36,7 @@ vi.mock('../../src/services/audioEngine', () => ({
     init: initMock,
     play4TrackAnalysis: play4TrackMock,
     playAnalysisNotes: playNotesMock,
+    setAnalysisTrackVolume: setVolumeMock,
   },
 }))
 
@@ -221,27 +223,54 @@ describe('観点2: 再生トグル', () => {
 // ============================================================
 // 観点3: ミュート（mutedTracks）
 // ============================================================
-describe('観点3: ミュート', () => {
-  it('Bass トラックをミュートすると再生時に bass=[]（空配列）が渡る', async () => {
+describe('観点3: 音量スライダー（ソロ/ミュートは廃止し音量のみ）', () => {
+  it('Bass の音量を0にすると再生時に bass=[]（実質ミュート）が渡る', async () => {
     render(<AnalysisPianoRollModal isOpen onClose={() => {}} result={makeFourTrackResult()} />)
 
-    // Bass トラックヘッダー内のミュートボタン（初期ラベル "M"）をクリック
+    // Bass トラックヘッダー内の音量スライダーを 0 にする
     const bassLabel = screen.getByText('Bass')
     const bassHeader = bassLabel.closest('div')!.parentElement as HTMLElement
-    const muteBtn = within(bassHeader).getByRole('button', { name: 'M' })
-    fireEvent.click(muteBtn)
-    // ミュート後はラベルが "MUTED" になる
-    expect(within(bassHeader).getByRole('button', { name: 'MUTED' })).toBeInTheDocument()
+    const slider = within(bassHeader).getByLabelText('Bass 音量') as HTMLInputElement
+    fireEvent.change(slider, { target: { value: '0' } })
 
     fireEvent.click(screen.getByRole('button', { name: '▶ Play' }))
     await screen.findByRole('button', { name: '⏹ Stop' })
 
     const [tracksArg, mutedArg] = play4TrackMock.mock.calls[0]
-    expect(tracksArg.bass).toEqual([]) // ミュート → 空配列
-    // other は常に空（非再生）。melody（ボーカル）はミュートしない限り再生する
+    expect(tracksArg.bass).toEqual([]) // 音量0 → 空配列（実質ミュート）
     expect(tracksArg.other).toEqual([])
-    expect(tracksArg.melody).toHaveLength(1)
+    expect(tracksArg.melody).toHaveLength(1) // 他は通常再生
     expect(mutedArg.has('bass')).toBe(true)
+  })
+
+  it('「Bass 以外を0」にすると bass だけ鳴る（ソロ相当）', async () => {
+    render(<AnalysisPianoRollModal isOpen onClose={() => {}} result={makeFourTrackResult()} />)
+
+    for (const label of ['Drums', 'Melody', 'Keyboard', 'Guitar']) {
+      const header = screen.getByText(label).closest('div')!.parentElement as HTMLElement
+      const s = within(header).getByLabelText(`${label} 音量`) as HTMLInputElement
+      fireEvent.change(s, { target: { value: '0' } })
+    }
+
+    fireEvent.click(screen.getByRole('button', { name: '▶ Play' }))
+    await screen.findByRole('button', { name: '⏹ Stop' })
+
+    const [tracksArg] = play4TrackMock.mock.calls[0]
+    expect(tracksArg.bass.length).toBeGreaterThan(0) // bass だけ鳴る
+    expect(tracksArg.melody).toEqual([])
+    expect(tracksArg.guitar).toEqual([])
+    expect(tracksArg.keyboard).toEqual([])
+  })
+
+  it('音量スライダー変更で setAnalysisTrackVolume(track, v) が呼ばれる（実音に反映）', () => {
+    render(<AnalysisPianoRollModal isOpen onClose={() => {}} result={makeFourTrackResult()} />)
+
+    const bassLabel = screen.getByText('Bass')
+    const bassHeader = bassLabel.closest('div')!.parentElement as HTMLElement
+    const slider = within(bassHeader).getByLabelText('Bass 音量') as HTMLInputElement
+    fireEvent.change(slider, { target: { value: '0.5' } })
+
+    expect(setVolumeMock).toHaveBeenCalledWith('bass', 0.5)
   })
 })
 

@@ -33,6 +33,8 @@ export interface UseAnalysisPlaybackResult {
   playbackTime: number
   handlePlayToggle: () => Promise<void>
   handleSeek: (time: number) => void
+  /** トラック別ボリューム倍率を設定（IAudioEngine 抽象越し・リアルタイム反映） */
+  setTrackVolume: (track: string, volume: number) => void
 }
 
 export function useAnalysisPlayback({
@@ -117,10 +119,16 @@ export function useAnalysisPlayback({
     }
   }, [isOpen, isPlaying])
 
+  // トラック別ボリューム倍率を再生エンジンへ反映（リアルタイム）
+  const setTrackVolume = useCallback((track: string, volume: number) => {
+    audioEngine.setAnalysisTrackVolume(track, volume)
+  }, [audioEngine])
+
   return {
     isPlaying,
     playbackTime,
     handlePlayToggle,
     handleSeek,
+    setTrackVolume,
   }
 }

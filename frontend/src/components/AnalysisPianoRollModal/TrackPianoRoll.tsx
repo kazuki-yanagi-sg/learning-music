@@ -78,8 +78,9 @@ interface TrackPianoRollProps {
   zoom: number
   playbackTime: number
   isPlaying: boolean
-  isMuted: boolean
-  onToggleMute: () => void
+  // 音量（UI は音量スライダーのみ。0 で実質ミュート）
+  volume?: number
+  onVolumeChange?: (volume: number) => void
   onSeek?: (time: number) => void
   // ドラッグ選択
   onDragStart?: (time: number) => void
@@ -96,8 +97,8 @@ export function TrackPianoRoll({
   zoom,
   playbackTime,
   isPlaying,
-  isMuted,
-  onToggleMute,
+  volume = 1,
+  onVolumeChange,
   onSeek,
   onDragStart,
   onDragMove,
@@ -105,6 +106,8 @@ export function TrackPianoRoll({
   selectionStart,
   selectionEnd,
 }: TrackPianoRollProps) {
+  // 音量0は実質ミュート（行を薄く表示）
+  const isSilenced = volume <= 0
   const config = TRACK_CONFIG[trackType]
   const containerRef = useRef<HTMLDivElement>(null)
 
@@ -152,7 +155,7 @@ export function TrackPianoRoll({
   }, [isPlaying, playbackTime, pixelsPerSecond])
 
   return (
-    <div className={`flex flex-col border-b border-gray-700 ${isMuted ? 'opacity-40' : ''}`}>
+    <div className={`flex flex-col border-b border-gray-700 ${isSilenced ? 'opacity-40' : ''}`}>
       {/* トラックヘッダー */}
       <div
         className="flex items-center justify-between px-3 py-1 border-b border-gray-600"
@@ -166,16 +169,27 @@ export function TrackPianoRoll({
           <span className="text-sm font-bold text-white">{config.label}</span>
           <span className="text-xs text-white/70">({notes.length} notes)</span>
         </div>
-        <button
-          onClick={onToggleMute}
-          className={`px-2 py-0.5 rounded text-xs font-bold ${
-            isMuted
-              ? 'bg-gray-600 text-gray-300'
-              : 'bg-white/20 text-white hover:bg-white/30'
-          }`}
-        >
-          {isMuted ? 'MUTED' : 'M'}
-        </button>
+        {/* 音量スライダー（0〜1.5、既定1.0。0で実質ミュート）。
+            操作しやすいよう 🔊アイコン＋広めのスライダー＋%表示をまとめる。 */}
+        {onVolumeChange && (
+          <div className="flex items-center gap-2 bg-black/25 rounded px-2 py-1">
+            <span className="text-xs" aria-hidden>🔊</span>
+            <input
+              type="range"
+              min={0}
+              max={1.5}
+              step={0.05}
+              value={volume}
+              onChange={(e) => onVolumeChange(Number(e.target.value))}
+              aria-label={`${config.label} 音量`}
+              title={`${config.label} 音量 ${Math.round(volume * 100)}%（0で消音）`}
+              className="w-32 h-1.5 accent-white cursor-pointer"
+            />
+            <span className="text-xs font-bold text-white w-10 text-right tabular-nums">
+              {Math.round(volume * 100)}%
+            </span>
+          </div>
+        )}
       </div>
 
       {/* ピアノロール */}

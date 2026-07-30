@@ -11,6 +11,11 @@ import { AnalysisDrumGrid } from './AnalysisDrumGrid'
 import { useDragSelection } from './useDragSelection'
 import { useAnalysisPlayback } from './useAnalysisPlayback'
 import { TrackPianoRoll, TrackType } from './TrackPianoRoll'
+import {
+  computeMutedFromVolumes,
+  PLAYABLE_TRACKS,
+  DEFAULT_TRACK_VOLUME,
+} from './trackControls'
 
 interface AnalysisPianoRollModalProps {
   isOpen: boolean
@@ -30,7 +35,16 @@ export function AnalysisPianoRollModal({
 }: AnalysisPianoRollModalProps) {
   const modalRef = useRef<HTMLDivElement>(null)
   const [zoom, setZoom] = useState(1)
-  const [mutedTracks, setMutedTracks] = useState<Set<string>>(new Set())
+  // トラック別ボリューム（0..1.5、既定 1）。UI は音量スライダーのみ。
+  // ソロ/ミュートボタンは廃止し、スライダーを 0 にすれば実質ミュート＝
+  // 聴きたいトラック以外を 0 にすればソロ相当。
+  const [trackVolumes, setTrackVolumes] = useState<Record<string, number>>({})
+
+  // 音量0のトラックは鳴らさない（実効ミュート）。これを再生に渡す。
+  const effectiveMuted = useMemo(
+    () => computeMutedFromVolumes(PLAYABLE_TRACKS, trackVolumes),
+    [trackVolumes],
+  )
 
   // トラックデータをrefで保持（シーク時に参照）
   const tracksDataRef = useRef<typeof tracksData | null>(null)
@@ -55,9 +69,10 @@ export function AnalysisPianoRollModal({
     playbackTime,
     handlePlayToggle,
     handleSeek,
+    setTrackVolume: applyTrackVolume,
   } = useAnalysisPlayback({
     result,
-    mutedTracks,
+    mutedTracks: effectiveMuted,
     isOpen,
     clearSelection,
   })
@@ -92,18 +107,17 @@ export function AnalysisPianoRollModal({
     tracksDataRef.current = tracksData
   }, [tracksData])
 
-  // ミュート切り替え
-  const toggleMute = useCallback((trackType: string) => {
-    setMutedTracks(prev => {
-      const next = new Set(prev)
-      if (next.has(trackType)) {
-        next.delete(trackType)
-      } else {
-        next.add(trackType)
-      }
-      return next
-    })
-  }, [])
+  // 音量変更（state 更新＋エンジンへリアルタイム反映）
+  const handleVolumeChange = useCallback((trackType: string, volume: number) => {
+    setTrackVolumes(prev => ({ ...prev, [trackType]: volume }))
+    applyTrackVolume?.(trackType, volume)
+  }, [applyTrackVolume])
+
+  // トラックの現在ボリュームを引く（未設定は既定値）
+  const volumeOf = useCallback(
+    (trackType: string) => trackVolumes[trackType] ?? DEFAULT_TRACK_VOLUME,
+    [trackVolumes],
+  )
 
   // 選択範囲を計算（ドラッグ選択 or 現在位置±5秒）
   const analysisRange = useMemo(() => {
@@ -295,8 +309,8 @@ export function AnalysisPianoRollModal({
                 zoom={zoom}
                 playbackTime={playbackTime}
                 isPlaying={isPlaying}
-                isMuted={mutedTracks.has('drums')}
-                onToggleMute={() => toggleMute('drums')}
+                volume={volumeOf('drums')}
+                onVolumeChange={(v) => handleVolumeChange('drums', v)}
                 tempo={result.tempo || 120}
                 onSeek={handleSeek}
                 onDragStart={handleDragStart}
@@ -317,8 +331,8 @@ export function AnalysisPianoRollModal({
                     zoom={zoom}
                     playbackTime={playbackTime}
                     isPlaying={isPlaying}
-                    isMuted={mutedTracks.has(trackType)}
-                    onToggleMute={() => toggleMute(trackType)}
+                    volume={volumeOf(trackType)}
+                    onVolumeChange={(v) => handleVolumeChange(trackType, v)}
                     onSeek={handleSeek}
                     onDragStart={handleDragStart}
                     onDragMove={handleDragMove}
@@ -338,8 +352,6 @@ export function AnalysisPianoRollModal({
               zoom={zoom}
               playbackTime={playbackTime}
               isPlaying={isPlaying}
-              isMuted={false}
-              onToggleMute={() => {}}
               onSeek={handleSeek}
               onDragStart={handleDragStart}
               onDragMove={handleDragMove}
@@ -352,7 +364,7 @@ export function AnalysisPianoRollModal({
 
         {/* フッター */}
         <div className="px-4 py-2 border-t border-gray-700 bg-gray-800 text-xs text-gray-400">
-          Space: Play/Stop | Click: 位置移動 | Drag: 範囲選択 | M: Mute
+          Space: Play/Stop | Click: 位置移動 | Drag: 範囲選択 | 🔊 各トラックの音量で調整（0で消音）
         </div>
       </div>
     </div>
