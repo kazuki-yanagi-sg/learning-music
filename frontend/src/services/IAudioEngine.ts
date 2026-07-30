@@ -61,4 +61,11 @@ export interface IAudioEngine {
     trackType?: 'drums' | 'bass' | 'other' | 'default',
     onProgress?: (time: number) => void
   ): PlaybackHandle
+
+  /**
+   * 解析再生のトラック別ボリューム倍率を設定する（リアルタイム反映）。
+   * @param track  解析トラック名（drums/bass/other/melody/guitar/keyboard）
+   * @param volume 0（無音）〜（既定 1。1超で増幅）
+   */
+  setAnalysisTrackVolume(track: string, volume: number): void
 }

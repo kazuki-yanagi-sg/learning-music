@@ -68,8 +68,8 @@ const engine = audioEngine as unknown as Record<string, unknown>
 
 /** soundfont 有無を指定してモック楽器を注入する */
 function setup(opts: { soundfontsLoaded: boolean; drumSamplesLoaded: boolean }) {
-  // melody は sfPiano を流用するため sfVoice は廃止済み
-  const sf = { sfBass: makeSf(), sfPiano: makeSf(), sfGuitar: makeSf() }
+  // melody は sfMelody（独立ピアノ音源）で再生（keyboard は sfPiano）
+  const sf = { sfBass: makeSf(), sfPiano: makeSf(), sfGuitar: makeSf(), sfMelody: makeSf() }
   const synth = {
     bass: makeSynth(),
     keyboard: makeSynth(),
@@ -149,18 +149,13 @@ describe('play4TrackAnalysis - guitar/keyboard 音源マッピング（B-4）', 
     expect(sf.sfGuitar.play).toHaveBeenCalledWith(FAKE_NOTE, TIME, { duration: 0.5 })
   })
 
-  it('melody トラック(soundfont あり) → sfPiano.play（ピアノ音源流用、声系廃止）', () => {
-    // melody は sfPiano（acoustic_grand_piano）を流用する（声系音源 sfVoice は廃止済み）
+  it('melody トラック(soundfont あり) → sfMelody.play（独立ピアノ音源）', () => {
+    // melody は sfMelody（acoustic_grand_piano・独立ゲインノード）で再生。
+    // 音量はマスターGainNode管理のため per-note gain は渡さない。
     const { sf } = setup({ soundfontsLoaded: true, drumSamplesLoaded: false })
     audioEngine.play4TrackAnalysis({ melody: notes })
     flushScheduled(TIME)
-    // sfPiano で再生されること（melody=sfPiano 統一）。
-    // melody は主旋律として少し大きく鳴らすため相対ゲイン(2.0/1.5)を渡す。
-    expect(sf.sfPiano.play).toHaveBeenCalledWith(
-      FAKE_NOTE,
-      TIME,
-      { duration: 0.5, gain: 2.0 / 1.5 },
-    )
+    expect(sf.sfMelody.play).toHaveBeenCalledWith(FAKE_NOTE, TIME, { duration: 0.5 })
   })
 
   it('bass トラック(soundfont あり) → sfBass.play（後方互換）', () => {

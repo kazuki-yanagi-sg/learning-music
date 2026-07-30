@@ -34,9 +34,17 @@ class AudioEngine {
 
   // SoundFont楽器（GM音源）
   private sfBass: SoundfontPlayer | null = null
-  private sfPiano: SoundfontPlayer | null = null  // melody も sfPiano を流用
+  private sfPiano: SoundfontPlayer | null = null   // keyboard 用
   private sfGuitar: SoundfontPlayer | null = null
-  // ※ sfVoice（choir_aahs）は廃止済み。melody は sfPiano で再生する。
+  private sfMelody: SoundfontPlayer | null = null  // melody 用（piano音色だが独立ゲイン制御のため別インスタンス）
+  // ※ sfVoice（choir_aahs）は廃止済み。melody は acoustic_grand_piano で再生する。
+
+  // 解析トラックごとの「マスターGainNode」。SoundFont 出力をこのノード経由で出し、
+  // スライダーは node.gain.value を即時更新する → 再生中でもリアルタイムに音量が変わる。
+  // （per-note gain はスケジュール時に確定するため再生中のライブ変更が効かない＝旧バグ）
+  private analysisGainNodes: Record<string, GainNode | null> = {
+    bass: null, guitar: null, keyboard: null, melody: null,
+  }
 
   // シンセ楽器（フォールバック用）
   private kick: Tone.MembraneSynth | null = null
@@ -55,6 +63,13 @@ class AudioEngine {
     bass: null,
     keyboard: null,
     guitar: null,
+  }
+
+  // 解析再生(play4TrackAnalysis)用のトラック別ボリューム倍率（0=無音, 1=既定）。
+  // SoundFont 再生は Tone.Volume ノードを経由しないため、ノート単位の gain に
+  // この倍率を掛けて反映する。キーは解析トラック名（drums/bass/other/melody/guitar/keyboard）。
+  private analysisTrackVolumes: Record<string, number> = {
+    drums: 1, bass: 1, other: 1, melody: 1, guitar: 1, keyboard: 1,
   }
 
   /**
@@ -186,29 +201,46 @@ class AudioEngine {
 
       console.log('Loading SoundFont instruments...')
 
-      // 並列でロード（音色名・ゲインは constants/instruments.ts から参照）
-      // melody は sfPiano を流用するため、ロードは bass/piano/guitar の3音源のみ
-      const [bass, piano, guitar] = await Promise.all([
+      // トラックごとのマスターGainNodeを作成し、destination へ接続する。
+      // 初期ゲイン = 各トラックの基準音量（SF_GAINS）× 既定ボリューム(1)。
+      // スライダーはこのノードの gain を直接更新する（再生中でも即反映）。
+      const ctx = this.audioContext
+      const makeGain = (base: number): GainNode => {
+        const g = ctx.createGain()
+        g.gain.value = base
+        g.connect(ctx.destination)
+        return g
+      }
+      this.analysisGainNodes.bass = makeGain(SF_GAINS.bass)
+      this.analysisGainNodes.guitar = makeGain(SF_GAINS.guitar)
+      this.analysisGainNodes.keyboard = makeGain(SF_GAINS.piano)
+      this.analysisGainNodes.melody = makeGain(SF_GAINS.melody)
+
+      // 各 SoundFont を「自分のトラックGainNode」へ出力する（destination 指定）。
+      // 楽器ロード時の gain は 1（音量はノード側で一元管理）。
+      // melody は keyboard と同じ acoustic_grand_piano だが、独立ゲインのため別インスタンス。
+      const [bass, piano, guitar, melody] = await Promise.all([
         Soundfont.instrument(this.audioContext, SF_INSTRUMENTS.bass, {
-          soundfont: 'MusyngKite',
-          gain: SF_GAINS.bass,
+          soundfont: 'MusyngKite', gain: 1, destination: this.analysisGainNodes.bass,
         }),
         Soundfont.instrument(this.audioContext, SF_INSTRUMENTS.piano, {
-          soundfont: 'MusyngKite',
-          gain: SF_GAINS.piano,
+          soundfont: 'MusyngKite', gain: 1, destination: this.analysisGainNodes.keyboard,
         }),
         Soundfont.instrument(this.audioContext, SF_INSTRUMENTS.guitar, {
-          soundfont: 'MusyngKite',
-          gain: SF_GAINS.guitar,
+          soundfont: 'MusyngKite', gain: 1, destination: this.analysisGainNodes.guitar,
+        }),
+        Soundfont.instrument(this.audioContext, SF_INSTRUMENTS.piano, {
+          soundfont: 'MusyngKite', gain: 1, destination: this.analysisGainNodes.melody,
         }),
       ])
 
       this.sfBass = bass
-      this.sfPiano = piano  // melody も sfPiano を流用
+      this.sfPiano = piano       // keyboard 用
       this.sfGuitar = guitar
+      this.sfMelody = melody     // melody 用（独立ゲイン）
       this.soundfontsLoaded = true
 
-      console.log('SoundFont instruments loaded: bass, piano(melody共用), guitar')
+      console.log('SoundFont instruments loaded: bass, piano(keyboard), guitar, melody')
     } catch (err) {
       console.warn('Failed to load SoundFont instruments, using synth fallback:', err)
       this.soundfontsLoaded = false
@@ -233,6 +265,47 @@ class AudioEngine {
       volumeNode.volume.value = volume > 0 ? 20 * Math.log10(volume) : -60
     }
   }
+
+  /**
+   * 解析再生(play4TrackAnalysis)のトラック別ボリュームを設定する。
+   *
+   * SoundFont トラック(bass/guitar/keyboard/melody)はマスターGainNodeの gain を
+   * 直接更新するため、**再生中でもリアルタイムに音量が変わる**（per-note gain と違い
+   * スケジュール済みノートにも即反映）。node gain = 基準音量(SF_GAINS) × volume。
+   * drums は Tone.Volume ノード経由で同様に即時反映。
+   *
+   * @param track  解析トラック名（drums/bass/other/melody/guitar/keyboard）
+   * @param volume 0（無音）〜（既定 1。1超で増幅も可）。負値は 0 に丸める。
+   */
+  setAnalysisTrackVolume(track: string, volume: number): void {
+    const v = Math.max(0, volume)
+    this.analysisTrackVolumes[track] = v
+
+    // SoundFont トラックはマスターGainNodeを即時更新（基準音量 × volume）
+    const base = this.trackBaseGain(track)
+    const node = this.analysisGainNodes[track]
+    if (node) {
+      node.gain.value = base * v
+    }
+
+    // drums は Tone.Volume ノード(this.volumes.drum)経由。基準 -6dB に倍率を反映。
+    if (track === 'drums' && this.volumes.drum) {
+      const BASE_DRUM_DB = -6
+      this.volumes.drum.volume.value = v > 0 ? BASE_DRUM_DB + 20 * Math.log10(v) : -60
+    }
+  }
+
+  /** 解析トラックの基準音量（SF_GAINS）。GainNode初期値と一致させる。 */
+  private trackBaseGain(track: string): number {
+    switch (track) {
+      case 'bass': return SF_GAINS.bass
+      case 'guitar': return SF_GAINS.guitar
+      case 'keyboard': return SF_GAINS.piano
+      case 'melody': return SF_GAINS.melody
+      default: return 1
+    }
+  }
+
 
   /**
    * トラックをミュート
@@ -284,14 +357,10 @@ class AudioEngine {
     // 楽器ごとの「SoundFontプレイヤー」と「フォールバックシンセ + シンセに渡す値」を引く
     const sf = this.instrumentSoundfont(trackType)
     if (this.soundfontsLoaded && sf) {
-      // melody は sfPiano(piano gain=1.5)を流用しているため、主旋律として
-      // 少し大きく鳴らすよう、ノート単位の相対ゲイン(melody/piano)を掛ける。
-      // 他トラックは追加ゲイン無し（ロード時の gain のまま）。
-      const playOpts: { duration: number; gain?: number } = { duration }
-      if (trackType === 'melody') {
-        playOpts.gain = SF_GAINS.melody / SF_GAINS.piano
-      }
-      sf.play(note, time, playOpts)
+      // 音量は各トラックのマスターGainNode（destination 指定済み）で一元管理する。
+      // per-note gain は渡さない（再生中のスライダー変更がスケジュール済みノートに
+      // 効かない原因だったため）。スライダーは setAnalysisTrackVolume で node.gain を即更新。
+      sf.play(note, time, { duration })
       return
     }
 
@@ -307,7 +376,7 @@ class AudioEngine {
 
   /**
    * 旋律系トラックに対応する SoundFont プレイヤーを返す。
-   * melody は sfPiano（acoustic_grand_piano）を流用する。
+   * melody は sfMelody（acoustic_grand_piano・独立ゲイン）、keyboard は sfPiano。
    * （sfVoice/choir_aahs は廃止済み）
    */
   private instrumentSoundfont(
@@ -321,8 +390,8 @@ class AudioEngine {
       case 'guitar':
         return this.sfGuitar
       case 'melody':
-        // メロディは sfPiano（acoustic_grand_piano）を流用する（声系音源廃止）
-        return this.sfPiano
+        // メロディは sfMelody（acoustic_grand_piano・独立ゲインノード）で再生
+        return this.sfMelody
     }
   }
 
@@ -688,17 +757,18 @@ class AudioEngine {
           const freq = this.midiToFreq(note.pitch)
           const noteName = this.midiToNote(note.pitch)
 
+          // 音量は各トラックのマスターGainNode（および drums の Tone.Volume）で
+          // 一元管理し、setAnalysisTrackVolume が即時更新する＝再生中もリアルタイム反映。
+          // ここでは per-note gain を渡さない。
           switch (trackType) {
             case 'drums':
               this.triggerDrumNote(note.pitch, time)
               break
             case 'bass':
-              // sfBass / bass(freq) → 'bass' の対応と完全一致
               this.playInstrument('bass', freq, noteName, duration, time)
               break
             case 'other':
-              // other（後方互換）はギター音源で再生（sfGuitar）
-              // フォールバックは keyboard(note)
+              // other（後方互換）はギター音源で再生（sfGuitar）。フォールバックは keyboard
               if (this.soundfontsLoaded && this.sfGuitar) {
                 this.sfGuitar.play(noteName, time, { duration })
               } else {
@@ -706,17 +776,13 @@ class AudioEngine {
               }
               break
             case 'melody':
-              // メロディ = sfPiano（acoustic_grand_piano）で再生（声系音源廃止）。
-              // sfPiano ロード失敗時は keyboard シンセにフォールバック（playInstrument ヘルパー内で処理）
+              // メロディ = sfMelody（acoustic_grand_piano・独立ゲインノード）
               this.playInstrument('melody', freq, noteName, duration, time)
               break
             case 'guitar':
-              // htdemucs_6s guitar stem → sfGuitar で再生（設計書 B-4）
               this.playInstrument('guitar', freq, noteName, duration, time)
               break
             case 'keyboard':
-              // htdemucs_6s piano stem → sfPiano で再生（設計書 B-4）
-              // playInstrument の 'keyboard' case は sfPiano を使用
               this.playInstrument('keyboard', freq, noteName, duration, time)
               break
           }
@@ -799,13 +865,17 @@ class AudioEngine {
     this.drumSamplesLoaded = false
 
     // SoundFont楽器（メモリリーク防止: stop() 後 null 化）
-    // melody は sfPiano を流用しているため、sfPiano の解放のみで十分
     this.sfBass?.stop()
     this.sfPiano?.stop()
     this.sfGuitar?.stop()
+    this.sfMelody?.stop()
     this.sfBass = null
     this.sfPiano = null
     this.sfGuitar = null
+    this.sfMelody = null
+    // トラックGainNodeを切断
+    Object.values(this.analysisGainNodes).forEach((n) => n?.disconnect())
+    this.analysisGainNodes = { bass: null, guitar: null, keyboard: null, melody: null }
     this.soundfontsLoaded = false
 
     // シンセ楽器

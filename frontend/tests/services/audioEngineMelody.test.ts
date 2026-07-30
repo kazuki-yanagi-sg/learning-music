@@ -80,11 +80,13 @@ const engine = audioEngine as unknown as Record<string, unknown>
 function setup(opts: {
   soundfontsLoaded: boolean
   drumSamplesLoaded: boolean
+  // melody 用 SoundFont プレイヤー（旧名 sfPiano。null でロード失敗ケースを表現）
   sfPiano?: { play: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> } | null
 }) {
   const sfBass = makeSf()
-  // sfPiano が明示指定されなければ新規生成（soundfontsLoaded=true 時の正常ケース）
-  const sfPiano = opts.sfPiano !== undefined ? opts.sfPiano : makeSf()
+  // melody は sfMelody（独立ピアノ音源）で再生。opts.sfPiano は melody 用プレイヤーを指す。
+  const sfMelody = opts.sfPiano !== undefined ? opts.sfPiano : makeSf()
+  const sfPiano = makeSf()  // keyboard 用（melody とは別インスタンス）
   const sfGuitar = makeSf()
 
   const synth = {
@@ -109,14 +111,15 @@ function setup(opts: {
     drumSamplesLoaded: opts.drumSamplesLoaded,
     drumSampler,
     sfBass,
-    sfPiano,   // melody は sfPiano を流用（sfVoice は廃止）
+    sfPiano,    // keyboard 用
+    sfMelody,   // melody 用（独立ピアノ音源）
     sfGuitar,
-    // sfVoice フィールドは存在しない（melody=sfPiano に統一）
     ...synth,
   })
 
   scheduledCallbacks.length = 0
-  return { sfBass, sfPiano, sfGuitar, synth, drumSampler }
+  // 互換のため melody 用プレイヤーを sfPiano という名でも返す（既存アサーション用）
+  return { sfBass, sfPiano: sfMelody, sfMelody, sfGuitar, synth, drumSampler }
 }
 
 function flushScheduled(time: number) {
@@ -158,15 +161,11 @@ describe('T1: melody → ピアノ音源(sfPiano)で再生', () => {
     const { sfPiano, sfBass } = setup({ soundfontsLoaded: true, drumSamplesLoaded: false })
     audioEngine.play4TrackAnalysis({ melody: notes })
     flushScheduled(TIME)
-    // sfPiano（ピアノ音源）で再生される。
-    // melody は主旋律として少し大きく鳴らすため、相対ゲイン(melody/piano=2.0/1.5)を渡す。
-    expect(sfPiano!.play).toHaveBeenCalledWith(
-      FAKE_NOTE,
-      TIME,
-      { duration: 0.5, gain: SF_GAINS.melody / SF_GAINS.piano },
-    )
-    // melody のゲイン倍率は 1 より大きい（=piano より大きく鳴る）
-    expect(SF_GAINS.melody / SF_GAINS.piano).toBeGreaterThan(1)
+    // melody 用ピアノ音源で再生される。音量はマスターGainNode管理のため
+    // per-note gain は渡さない（再生中スライダー変更を効かせるための構造）。
+    expect(sfPiano!.play).toHaveBeenCalledWith(FAKE_NOTE, TIME, { duration: 0.5 })
+    // melody の基準音量は keyboard(=piano,1.5)より大きい（=より大きく鳴る）
+    expect(SF_GAINS.melody).toBeGreaterThan(SF_GAINS.piano)
     // sfBass は呼ばれない（偽陰性でないことの確認）
     expect(sfBass.play).not.toHaveBeenCalled()
   })

@@ -83,8 +83,8 @@ const engine = audioEngine as unknown as Record<string, unknown>
 
 // 楽器モック一式を注入し、soundfont 有無を切り替える
 function setup(opts: { soundfontsLoaded: boolean; drumSamplesLoaded: boolean }) {
-  // melody は sfPiano を流用するため sfVoice は廃止済み
-  const sf = { sfBass: makeSf(), sfPiano: makeSf(), sfGuitar: makeSf() }
+  // melody は sfMelody（piano音色・独立ゲインノード）で再生する（keyboard は sfPiano）
+  const sf = { sfBass: makeSf(), sfPiano: makeSf(), sfGuitar: makeSf(), sfMelody: makeSf() }
   const synth = {
     bass: makeSynth(),
     keyboard: makeSynth(),
@@ -129,6 +129,10 @@ const SNARE_PITCH = 38 // 'snare'
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // audioEngine はシングルトンのため、解析トラック音量をテスト間で既定(1)に戻す
+  ;['drums', 'bass', 'other', 'melody', 'guitar', 'keyboard'].forEach((t) =>
+    audioEngine.setAnalysisTrackVolume(t, 1),
+  )
 })
 
 describe('playNote（即時再生・time 引数なし）', () => {
@@ -347,18 +351,43 @@ describe('playAnalysisNotes / play4TrackAnalysis（スケジュール再生）',
     expect(sf.sfGuitar.play).toHaveBeenCalledWith(FAKE_NOTE, TIME, { duration: 0.5 })
   })
 
-  it('play4TrackAnalysis melody(soundfont あり) → sfPiano.play（ピアノ音源流用）で再生', () => {
-    // melody は sfPiano（acoustic_grand_piano）を流用する（声系音源 sfVoice は廃止済み）
+  it('play4TrackAnalysis melody(soundfont あり) → sfMelody.play（独立ピアノ音源）で再生', () => {
+    // melody は sfMelody（acoustic_grand_piano・独立ゲインノード）で再生する。
+    // 音量はマスターGainNode管理のため per-note gain は渡さない。
     const { sf } = setup({ soundfontsLoaded: true, drumSamplesLoaded: false })
     audioEngine.play4TrackAnalysis({ melody: notes })
     flushScheduled(TIME)
-    // sfPiano で再生されること（melody=sfPiano 統一）。
-    // melody は主旋律として少し大きく鳴らすため相対ゲイン(2.0/1.5)を渡す。
-    expect(sf.sfPiano.play).toHaveBeenCalledWith(
-      FAKE_NOTE,
-      TIME,
-      { duration: 0.5, gain: 2.0 / 1.5 },
-    )
+    expect(sf.sfMelody.play).toHaveBeenCalledWith(FAKE_NOTE, TIME, { duration: 0.5 })
+    // keyboard 用の sfPiano は鳴らない（混線しない）
+    expect(sf.sfPiano.play).not.toHaveBeenCalled()
+  })
+
+  it('setAnalysisTrackVolume が melody のマスターGainNodeを即時更新する（再生中もリアルタイム反映）', () => {
+    setup({ soundfontsLoaded: true, drumSamplesLoaded: false })
+    // テスト用にフェイクGainNodeを注入（実機は loadSoundfonts で生成）
+    const fakeNode = { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() }
+    ;(engine as Record<string, unknown>).analysisGainNodes = {
+      bass: null, guitar: null, keyboard: null, melody: fakeNode,
+    }
+    // 0.5 倍 → node.gain = SF_GAINS.melody(2.0) * 0.5 = 1.0
+    audioEngine.setAnalysisTrackVolume('melody', 0.5)
+    expect(fakeNode.gain.value).toBe(1.0)
+    // 1.5 倍 → 3.0（上げると増大）
+    audioEngine.setAnalysisTrackVolume('melody', 1.5)
+    expect(fakeNode.gain.value).toBe(3.0)
+    // 0 → 0（無音）
+    audioEngine.setAnalysisTrackVolume('melody', 0)
+    expect(fakeNode.gain.value).toBe(0)
+  })
+
+  it('setAnalysisTrackVolume(bass,...) が bass のマスターGainNodeを更新する', () => {
+    setup({ soundfontsLoaded: true, drumSamplesLoaded: false })
+    const fakeNode = { gain: { value: 1 }, connect: vi.fn(), disconnect: vi.fn() }
+    ;(engine as Record<string, unknown>).analysisGainNodes = {
+      bass: fakeNode, guitar: null, keyboard: null, melody: null,
+    }
+    audioEngine.setAnalysisTrackVolume('bass', 0.25) // 2.0 * 0.25 = 0.5
+    expect(fakeNode.gain.value).toBe(0.5)
   })
 
   it('play4TrackAnalysis bass(soundfont なし) → bass.triggerAttackRelease(freq, duration, time)', () => {
