@@ -41,13 +41,20 @@ export interface AnalysisResult {
   analysis_text: string | null
 }
 
-// 4トラック解析結果
+// 4トラック（htdemucs_6s では6トラック）解析結果のトラックデータ
 export interface TrackNotes {
   notes: NoteInfo[]
   midi_path: string | null
   error: string | null
 }
 
+/**
+ * 楽器分離解析結果（htdemucs_6s: 6stem 対応）
+ *
+ * htdemucs_6s が返す 6 stem に対応するため guitar/keyboard フィールドを追加。
+ * 後方互換のため drums/bass/other/melody は必須のまま維持。
+ * guitar（ギター stem）/ keyboard（piano stem → キーボード表示）は optional。
+ */
 export interface FourTrackResult {
   video_id: string
   title: string
@@ -59,7 +66,9 @@ export interface FourTrackResult {
     drums: TrackNotes
     bass: TrackNotes
     other: TrackNotes
-    melody: TrackNotes  // ボーカルメロディ → ピアノで表示
+    melody: TrackNotes     // vocals stem 由来の歌メロ（再生音色はピアノ。歌声では鳴らさない）
+    guitar?: TrackNotes    // htdemucs_6s 追加 stem: ギター
+    keyboard?: TrackNotes  // htdemucs_6s 追加 stem: piano stem 由来（ピアノ伴奏）
   }
   chords: ChordInfo[]
   analysis_text: string | null

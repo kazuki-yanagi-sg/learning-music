@@ -4,35 +4,21 @@
  * 4トラック（ドラム、ベース、キーボード、ギター）の再生を管理
  * - ドラム: サンプル音源
  * - ベース/キーボード/ギター: SoundFont (GM音源)
+ * - メロディ: sfPiano（acoustic_grand_piano）を流用して再生
+ *   （声系音源 sfVoice/choir_aahs は廃止済み）
  */
 import * as Tone from 'tone'
 import Soundfont, { Player as SoundfontPlayer } from 'soundfont-player'
 import { Track, TrackType, Note } from '../types/music'
+// ドラムの再生用MIDIマッピングとサンプルURL（単一モジュールへ集約済み）
+import { DRUM_MAP, DRUM_SAMPLE_URLS } from '../constants/drumKit'
+// SoundFont 楽器定数（音色名・ゲイン）
+import { SF_INSTRUMENTS, SF_GAINS } from '../constants/instruments'
 
-// ドラムキットのマッピング（MIDIノート → 楽器）
-const DRUM_MAP: Record<number, 'kick' | 'snare' | 'hihat' | 'hihatOpen' | 'tom' | 'crash' | 'ride'> = {
-  36: 'kick',       // キック
-  38: 'snare',      // スネア
-  42: 'hihat',      // ハイハット(クローズ)
-  46: 'hihatOpen',  // ハイハット(オープン)
-  45: 'tom',        // ロータム
-  47: 'tom',        // ミドルタム
-  48: 'tom',        // ハイタム
-  49: 'crash',      // クラッシュ
-  51: 'ride',       // ライド
-}
-
-// ドラムサンプルURL（無料のドラムキット）
-const DRUM_SAMPLES_BASE = 'https://tonejs.github.io/audio/drum-samples/breakbeat13/'
-const DRUM_SAMPLE_URLS: Record<string, string> = {
-  kick: DRUM_SAMPLES_BASE + 'kick.mp3',
-  snare: DRUM_SAMPLES_BASE + 'snare.mp3',
-  hihat: DRUM_SAMPLES_BASE + 'hihat.mp3',
-  hihatOpen: DRUM_SAMPLES_BASE + 'hihat-open.mp3',
-  tom: DRUM_SAMPLES_BASE + 'tom1.mp3',
-  crash: DRUM_SAMPLES_BASE + 'crash.mp3',
-  ride: DRUM_SAMPLES_BASE + 'ride.mp3',
-}
+// triggerAttackRelease に渡しうる引数の型（音名/周波数=string|number、末尾 time=number、省略=undefined）
+type TriggerArg = string | number | undefined
+// Tone.js の各シンセが共通で持つ triggerAttackRelease を抽象化した最小インターフェース
+type TriggerSynth = { triggerAttackRelease: (...args: TriggerArg[]) => void }
 
 class AudioEngine {
   private isInitialized = false
@@ -48,8 +34,17 @@ class AudioEngine {
 
   // SoundFont楽器（GM音源）
   private sfBass: SoundfontPlayer | null = null
-  private sfPiano: SoundfontPlayer | null = null
+  private sfPiano: SoundfontPlayer | null = null   // keyboard 用
   private sfGuitar: SoundfontPlayer | null = null
+  private sfMelody: SoundfontPlayer | null = null  // melody 用（piano音色だが独立ゲイン制御のため別インスタンス）
+  // ※ sfVoice（choir_aahs）は廃止済み。melody は acoustic_grand_piano で再生する。
+
+  // 解析トラックごとの「マスターGainNode」。SoundFont 出力をこのノード経由で出し、
+  // スライダーは node.gain.value を即時更新する → 再生中でもリアルタイムに音量が変わる。
+  // （per-note gain はスケジュール時に確定するため再生中のライブ変更が効かない＝旧バグ）
+  private analysisGainNodes: Record<string, GainNode | null> = {
+    bass: null, guitar: null, keyboard: null, melody: null,
+  }
 
   // シンセ楽器（フォールバック用）
   private kick: Tone.MembraneSynth | null = null
@@ -68,6 +63,13 @@ class AudioEngine {
     bass: null,
     keyboard: null,
     guitar: null,
+  }
+
+  // 解析再生(play4TrackAnalysis)用のトラック別ボリューム倍率（0=無音, 1=既定）。
+  // SoundFont 再生は Tone.Volume ノードを経由しないため、ノート単位の gain に
+  // この倍率を掛けて反映する。キーは解析トラック名（drums/bass/other/melody/guitar/keyboard）。
+  private analysisTrackVolumes: Record<string, number> = {
+    drums: 1, bass: 1, other: 1, melody: 1, guitar: 1, keyboard: 1,
   }
 
   /**
@@ -199,28 +201,46 @@ class AudioEngine {
 
       console.log('Loading SoundFont instruments...')
 
-      // 並列でロード
-      const [bass, piano, guitar] = await Promise.all([
-        Soundfont.instrument(this.audioContext, 'electric_bass_finger', {
-          soundfont: 'MusyngKite',
-          gain: 2.0, // ベースは少し大きめに
+      // トラックごとのマスターGainNodeを作成し、destination へ接続する。
+      // 初期ゲイン = 各トラックの基準音量（SF_GAINS）× 既定ボリューム(1)。
+      // スライダーはこのノードの gain を直接更新する（再生中でも即反映）。
+      const ctx = this.audioContext
+      const makeGain = (base: number): GainNode => {
+        const g = ctx.createGain()
+        g.gain.value = base
+        g.connect(ctx.destination)
+        return g
+      }
+      this.analysisGainNodes.bass = makeGain(SF_GAINS.bass)
+      this.analysisGainNodes.guitar = makeGain(SF_GAINS.guitar)
+      this.analysisGainNodes.keyboard = makeGain(SF_GAINS.piano)
+      this.analysisGainNodes.melody = makeGain(SF_GAINS.melody)
+
+      // 各 SoundFont を「自分のトラックGainNode」へ出力する（destination 指定）。
+      // 楽器ロード時の gain は 1（音量はノード側で一元管理）。
+      // melody は keyboard と同じ acoustic_grand_piano だが、独立ゲインのため別インスタンス。
+      const [bass, piano, guitar, melody] = await Promise.all([
+        Soundfont.instrument(this.audioContext, SF_INSTRUMENTS.bass, {
+          soundfont: 'MusyngKite', gain: 1, destination: this.analysisGainNodes.bass,
         }),
-        Soundfont.instrument(this.audioContext, 'acoustic_grand_piano', {
-          soundfont: 'MusyngKite',
-          gain: 1.5,
+        Soundfont.instrument(this.audioContext, SF_INSTRUMENTS.piano, {
+          soundfont: 'MusyngKite', gain: 1, destination: this.analysisGainNodes.keyboard,
         }),
-        Soundfont.instrument(this.audioContext, 'electric_guitar_clean', {
-          soundfont: 'MusyngKite',
-          gain: 1.5,
+        Soundfont.instrument(this.audioContext, SF_INSTRUMENTS.guitar, {
+          soundfont: 'MusyngKite', gain: 1, destination: this.analysisGainNodes.guitar,
+        }),
+        Soundfont.instrument(this.audioContext, SF_INSTRUMENTS.piano, {
+          soundfont: 'MusyngKite', gain: 1, destination: this.analysisGainNodes.melody,
         }),
       ])
 
       this.sfBass = bass
-      this.sfPiano = piano
+      this.sfPiano = piano       // keyboard 用
       this.sfGuitar = guitar
+      this.sfMelody = melody     // melody 用（独立ゲイン）
       this.soundfontsLoaded = true
 
-      console.log('SoundFont instruments loaded: bass, piano, guitar')
+      console.log('SoundFont instruments loaded: bass, piano(keyboard), guitar, melody')
     } catch (err) {
       console.warn('Failed to load SoundFont instruments, using synth fallback:', err)
       this.soundfontsLoaded = false
@@ -247,6 +267,47 @@ class AudioEngine {
   }
 
   /**
+   * 解析再生(play4TrackAnalysis)のトラック別ボリュームを設定する。
+   *
+   * SoundFont トラック(bass/guitar/keyboard/melody)はマスターGainNodeの gain を
+   * 直接更新するため、**再生中でもリアルタイムに音量が変わる**（per-note gain と違い
+   * スケジュール済みノートにも即反映）。node gain = 基準音量(SF_GAINS) × volume。
+   * drums は Tone.Volume ノード経由で同様に即時反映。
+   *
+   * @param track  解析トラック名（drums/bass/other/melody/guitar/keyboard）
+   * @param volume 0（無音）〜（既定 1。1超で増幅も可）。負値は 0 に丸める。
+   */
+  setAnalysisTrackVolume(track: string, volume: number): void {
+    const v = Math.max(0, volume)
+    this.analysisTrackVolumes[track] = v
+
+    // SoundFont トラックはマスターGainNodeを即時更新（基準音量 × volume）
+    const base = this.trackBaseGain(track)
+    const node = this.analysisGainNodes[track]
+    if (node) {
+      node.gain.value = base * v
+    }
+
+    // drums は Tone.Volume ノード(this.volumes.drum)経由。基準 -6dB に倍率を反映。
+    if (track === 'drums' && this.volumes.drum) {
+      const BASE_DRUM_DB = -6
+      this.volumes.drum.volume.value = v > 0 ? BASE_DRUM_DB + 20 * Math.log10(v) : -60
+    }
+  }
+
+  /** 解析トラックの基準音量（SF_GAINS）。GainNode初期値と一致させる。 */
+  private trackBaseGain(track: string): number {
+    switch (track) {
+      case 'bass': return SF_GAINS.bass
+      case 'guitar': return SF_GAINS.guitar
+      case 'keyboard': return SF_GAINS.piano
+      case 'melody': return SF_GAINS.melody
+      default: return 1
+    }
+  }
+
+
+  /**
    * トラックをミュート
    */
   setTrackMute(trackType: TrackType, muted: boolean): void {
@@ -271,6 +332,93 @@ class AudioEngine {
   }
 
   /**
+   * 旋律系トラック（bass/keyboard/guitar/melody）の1音を再生する共通ヘルパー。
+   *
+   * 即時再生（time なし）とスケジュール再生（time あり）の両方を一本化する。
+   * - SoundFont が使える場合: sfXxx.play(note, time, { duration })
+   *   ※ time=undefined のときは即時版と同じく第2引数が undefined になる。
+   * - フォールバック（シンセ）の場合: synth.triggerAttackRelease(...)
+   *   ※ bass/guitar は freq、keyboard/melody は note を渡す。
+   *   ※ time が undefined のときは末尾 time を付けず2引数で呼ぶ（即時版と完全一致）。
+   *
+   * @param trackType 旋律系トラック種別（melody=sfPiano / フォールバックは keyboard）
+   * @param freq      MIDI から変換した周波数（bass/guitar 用）
+   * @param note      MIDI から変換した音名（soundfont / keyboard / melody 用）
+   * @param duration  発音長（秒）
+   * @param time      スケジュール時刻（即時再生では undefined）
+   */
+  private playInstrument(
+    trackType: 'bass' | 'keyboard' | 'guitar' | 'melody',
+    freq: number,
+    note: string,
+    duration: number,
+    time?: number
+  ): void {
+    // 楽器ごとの「SoundFontプレイヤー」と「フォールバックシンセ + シンセに渡す値」を引く
+    const sf = this.instrumentSoundfont(trackType)
+    if (this.soundfontsLoaded && sf) {
+      // 音量は各トラックのマスターGainNode（destination 指定済み）で一元管理する。
+      // per-note gain は渡さない（再生中のスライダー変更がスケジュール済みノートに
+      // 効かない原因だったため）。スライダーは setAnalysisTrackVolume で node.gain を即更新。
+      sf.play(note, time, { duration })
+      return
+    }
+
+    const { synth, value } = this.instrumentSynth(trackType, freq, note)
+    if (!synth) return
+    // 即時版（time なし）は2引数、スケジュール版（time あり）は3引数で呼ぶ
+    if (time === undefined) {
+      synth.triggerAttackRelease(value, duration)
+    } else {
+      synth.triggerAttackRelease(value, duration, time)
+    }
+  }
+
+  /**
+   * 旋律系トラックに対応する SoundFont プレイヤーを返す。
+   * melody は sfMelody（acoustic_grand_piano・独立ゲイン）、keyboard は sfPiano。
+   * （sfVoice/choir_aahs は廃止済み）
+   */
+  private instrumentSoundfont(
+    trackType: 'bass' | 'keyboard' | 'guitar' | 'melody'
+  ): SoundfontPlayer | null {
+    switch (trackType) {
+      case 'bass':
+        return this.sfBass
+      case 'keyboard':
+        return this.sfPiano
+      case 'guitar':
+        return this.sfGuitar
+      case 'melody':
+        // メロディは sfMelody（acoustic_grand_piano・独立ゲインノード）で再生
+        return this.sfMelody
+    }
+  }
+
+  /**
+   * 旋律系トラックに対応するフォールバックシンセと、それに渡す値（freq か note）を返す。
+   * bass/guitar は freq、keyboard/melody は note を使う。
+   * melody は sfPiano ロード失敗時に keyboard シンセへフォールバックする。
+   */
+  private instrumentSynth(
+    trackType: 'bass' | 'keyboard' | 'guitar' | 'melody',
+    freq: number,
+    note: string
+  ): { synth: TriggerSynth | null; value: number | string } {
+    switch (trackType) {
+      case 'bass':
+        return { synth: this.bass as TriggerSynth | null, value: freq }
+      case 'keyboard':
+        return { synth: this.keyboard as TriggerSynth | null, value: note }
+      case 'guitar':
+        return { synth: this.guitar as TriggerSynth | null, value: freq }
+      case 'melody':
+        // sfPiano ロード失敗時はキーボードシンセにフォールバック（note を渡す）
+        return { synth: this.keyboard as TriggerSynth | null, value: note }
+    }
+  }
+
+  /**
    * 単一のノートを再生（プレビュー用）
    */
   playNote(trackType: TrackType, pitch: number, duration: number = 0.5): void {
@@ -279,71 +427,86 @@ class AudioEngine {
     const freq = this.midiToFreq(pitch)
     const note = this.midiToNote(pitch)
 
-    switch (trackType) {
-      case 'drum':
-        this.playDrumSound(pitch)
-        break
-      case 'bass':
-        if (this.soundfontsLoaded && this.sfBass) {
-          this.sfBass.play(note, undefined, { duration })
-        } else {
-          this.bass?.triggerAttackRelease(freq, duration)
-        }
-        break
-      case 'keyboard':
-        if (this.soundfontsLoaded && this.sfPiano) {
-          this.sfPiano.play(note, undefined, { duration })
-        } else {
-          this.keyboard?.triggerAttackRelease(note, duration)
-        }
-        break
-      case 'guitar':
-        if (this.soundfontsLoaded && this.sfGuitar) {
-          this.sfGuitar.play(note, undefined, { duration })
-        } else {
-          this.guitar?.triggerAttackRelease(freq, duration)
-        }
-        break
+    if (trackType === 'drum') {
+      this.playDrumSound(pitch)
+      return
     }
+    // bass/keyboard/guitar は共通ヘルパーで即時再生（time なし）
+    this.playInstrument(trackType, freq, note, duration)
   }
 
   /**
-   * ドラム音を再生
+   * ドラム音を再生する共通ヘルパー。
+   *
+   * 即時再生（time なし）とスケジュール再生（time あり）を一本化する。
+   * triggerAttackRelease の末尾 time を有無で出し分ける。
+   *
+   * @param pitch MIDI ノート番号
+   * @param time  スケジュール時刻（即時再生では undefined）
    */
-  private playDrumSound(pitch: number): void {
+  private playDrumSound(pitch: number, time?: number): void {
     const drumType = DRUM_MAP[pitch] || 'kick'
 
     // サンプラーが読み込まれていればサンプル音を使用
     if (this.drumSamplesLoaded && this.drumSampler) {
       // ドラム種別をサンプラーのノートに変換
       const sampleNote = this.drumTypeToSampleNote(drumType)
-      this.drumSampler.triggerAttackRelease(sampleNote, '8n')
+      this.triggerWithOptionalTime(this.drumSampler as unknown as TriggerSynth, sampleNote, '8n', time)
       return
     }
 
-    // フォールバック: シンセ音
+    // フォールバック: シンセ音（楽器・音名・音価の対応表を引いて発音）
+    const fb = this.drumFallback(drumType)
+    if (!fb || !fb.synth) return
+    if (fb.note === undefined) {
+      // snare は音名なしで triggerAttackRelease(duration[, time])
+      this.triggerWithOptionalTime(fb.synth, fb.dur, time)
+    } else {
+      this.triggerWithOptionalTime(fb.synth, fb.note, fb.dur, time)
+    }
+  }
+
+  /**
+   * triggerAttackRelease を「末尾 time の有無」で出し分ける小ヘルパー。
+   * time が undefined のときは time 引数を付けない（即時版と完全一致）。
+   */
+  private triggerWithOptionalTime(
+    synth: TriggerSynth,
+    ...args: TriggerArg[]
+  ): void {
+    const time = args[args.length - 1]
+    const head = args.slice(0, -1)
+    if (time === undefined) {
+      synth.triggerAttackRelease(...head)
+    } else {
+      synth.triggerAttackRelease(...head, time)
+    }
+  }
+
+  /**
+   * フォールバックシンセのドラム発音定義を返す。
+   * note=undefined のシンセ（snare）は音名なしで発音する。
+   */
+  private drumFallback(
+    drumType: string
+  ): { synth: TriggerSynth | null; note?: string; dur: string } | null {
     switch (drumType) {
       case 'kick':
-        this.kick?.triggerAttackRelease('C1', '8n')
-        break
+        return { synth: this.kick as TriggerSynth | null, note: 'C1', dur: '8n' }
       case 'snare':
-        this.snare?.triggerAttackRelease('8n')
-        break
+        return { synth: this.snare as TriggerSynth | null, note: undefined, dur: '8n' }
       case 'hihat':
-        this.hihat?.triggerAttackRelease('C4', '32n')
-        break
+        return { synth: this.hihat as TriggerSynth | null, note: 'C4', dur: '32n' }
       case 'hihatOpen':
-        this.hihat?.triggerAttackRelease('C4', '16n')
-        break
+        return { synth: this.hihat as TriggerSynth | null, note: 'C4', dur: '16n' }
       case 'tom':
-        this.tom?.triggerAttackRelease('G2', '8n')
-        break
+        return { synth: this.tom as TriggerSynth | null, note: 'G2', dur: '8n' }
       case 'crash':
-        this.crash?.triggerAttackRelease('C4', '4n')
-        break
+        return { synth: this.crash as TriggerSynth | null, note: 'C4', dur: '4n' }
       case 'ride':
-        this.ride?.triggerAttackRelease('C4', '8n')
-        break
+        return { synth: this.ride as TriggerSynth | null, note: 'C4', dur: '8n' }
+      default:
+        return null
     }
   }
 
@@ -403,71 +566,20 @@ class AudioEngine {
     const noteName = this.midiToNote(note.pitch)
     const duration = note.duration * (60 / this.bpm)
 
-    switch (trackType) {
-      case 'drum':
-        this.triggerDrumNote(note.pitch, time)
-        break
-      case 'bass':
-        if (this.soundfontsLoaded && this.sfBass) {
-          this.sfBass.play(noteName, time, { duration })
-        } else {
-          this.bass?.triggerAttackRelease(freq, duration, time)
-        }
-        break
-      case 'keyboard':
-        if (this.soundfontsLoaded && this.sfPiano) {
-          this.sfPiano.play(noteName, time, { duration })
-        } else {
-          this.keyboard?.triggerAttackRelease(noteName, duration, time)
-        }
-        break
-      case 'guitar':
-        if (this.soundfontsLoaded && this.sfGuitar) {
-          this.sfGuitar.play(noteName, time, { duration })
-        } else {
-          this.guitar?.triggerAttackRelease(freq, duration, time)
-        }
-        break
+    if (trackType === 'drum') {
+      this.triggerDrumNote(note.pitch, time)
+      return
     }
+    // bass/keyboard/guitar は共通ヘルパーでスケジュール再生（time あり）
+    this.playInstrument(trackType, freq, noteName, duration, time)
   }
 
   /**
-   * ドラムノートをトリガー（スケジュール再生用）
+   * ドラムノートをトリガー（スケジュール再生用）。
+   * 実体は playDrumSound と共通。time を渡すだけ。
    */
   private triggerDrumNote(pitch: number, time: number): void {
-    const drumType = DRUM_MAP[pitch] || 'kick'
-
-    // サンプラーが読み込まれていればサンプル音を使用
-    if (this.drumSamplesLoaded && this.drumSampler) {
-      const sampleNote = this.drumTypeToSampleNote(drumType)
-      this.drumSampler.triggerAttackRelease(sampleNote, '8n', time)
-      return
-    }
-
-    // フォールバック: シンセ音
-    switch (drumType) {
-      case 'kick':
-        this.kick?.triggerAttackRelease('C1', '8n', time)
-        break
-      case 'snare':
-        this.snare?.triggerAttackRelease('8n', time)
-        break
-      case 'hihat':
-        this.hihat?.triggerAttackRelease('C4', '32n', time)
-        break
-      case 'hihatOpen':
-        this.hihat?.triggerAttackRelease('C4', '16n', time)
-        break
-      case 'tom':
-        this.tom?.triggerAttackRelease('G2', '8n', time)
-        break
-      case 'crash':
-        this.crash?.triggerAttackRelease('C4', '4n', time)
-        break
-      case 'ride':
-        this.ride?.triggerAttackRelease('C4', '8n', time)
-        break
-    }
+    this.playDrumSound(pitch, time)
   }
 
   /**
@@ -540,19 +652,13 @@ class AudioEngine {
             this.triggerDrumNote(note.pitch, time)
             break
           case 'bass':
-            if (this.soundfontsLoaded && this.sfBass) {
-              this.sfBass.play(noteName, time, { duration })
-            } else {
-              this.bass?.triggerAttackRelease(freq, duration, time)
-            }
+            // sfBass / bass(freq) → 'bass' の対応と完全一致
+            this.playInstrument('bass', freq, noteName, duration, time)
             break
           case 'other':
           case 'default':
-            if (this.soundfontsLoaded && this.sfPiano) {
-              this.sfPiano.play(noteName, time, { duration })
-            } else {
-              this.keyboard?.triggerAttackRelease(noteName, duration, time)
-            }
+            // sfPiano / keyboard(note) → 'keyboard' の対応と完全一致
+            this.playInstrument('keyboard', freq, noteName, duration, time)
             break
         }
       }, startTime)
@@ -597,7 +703,15 @@ class AudioEngine {
   }
 
   /**
-   * 4トラックの解析結果を再生（melody追加）
+   * 4〜6トラックの解析結果を再生（htdemucs_6s 対応: guitar/keyboard 追加）
+   *
+   * 音源マッピング（設計書 B-4）:
+   *   guitar   → sfGuitar（サウンドフォント）/ guitar シンセ（フォールバック）
+   *   keyboard → sfPiano（サウンドフォント）/ keyboard シンセ（フォールバック）
+   *   other    → sfGuitar（後方互換）
+   *   melody   → sfPiano（ピアノ音源流用）/ keyboard シンセ（フォールバック）
+   *              ※ 声系音源（sfVoice/choir_aahs）は廃止済み
+   *
    * @param startFrom 開始位置（秒）- 指定した位置から再生開始
    */
   play4TrackAnalysis(
@@ -606,6 +720,8 @@ class AudioEngine {
       bass?: Array<{ pitch: number; start: number; end: number }>;
       other?: Array<{ pitch: number; start: number; end: number }>;
       melody?: Array<{ pitch: number; start: number; end: number }>;
+      guitar?: Array<{ pitch: number; start: number; end: number }>;    // htdemucs_6s 追加
+      keyboard?: Array<{ pitch: number; start: number; end: number }>;  // htdemucs_6s 追加（piano stem）
     },
     mutedTracks: Set<string> = new Set(),
     onProgress?: (time: number) => void,
@@ -622,9 +738,10 @@ class AudioEngine {
     transport.bpm.value = 60
 
     // 各トラックのノートをスケジュール（startFromより後のノートのみ）
+    // htdemucs_6s 対応: guitar/keyboard を追加（設計書 B-4）
     const scheduleTrack = (
       notes: Array<{ pitch: number; start: number; end: number }> | undefined,
-      trackType: 'drums' | 'bass' | 'other' | 'melody'
+      trackType: 'drums' | 'bass' | 'other' | 'melody' | 'guitar' | 'keyboard'
     ) => {
       if (!notes || mutedTracks.has(trackType)) return
 
@@ -640,19 +757,18 @@ class AudioEngine {
           const freq = this.midiToFreq(note.pitch)
           const noteName = this.midiToNote(note.pitch)
 
+          // 音量は各トラックのマスターGainNode（および drums の Tone.Volume）で
+          // 一元管理し、setAnalysisTrackVolume が即時更新する＝再生中もリアルタイム反映。
+          // ここでは per-note gain を渡さない。
           switch (trackType) {
             case 'drums':
               this.triggerDrumNote(note.pitch, time)
               break
             case 'bass':
-              if (this.soundfontsLoaded && this.sfBass) {
-                this.sfBass.play(noteName, time, { duration })
-              } else {
-                this.bass?.triggerAttackRelease(freq, duration, time)
-              }
+              this.playInstrument('bass', freq, noteName, duration, time)
               break
             case 'other':
-              // other（ギター/キーボード）はギター音源で再生
+              // other（後方互換）はギター音源で再生（sfGuitar）。フォールバックは keyboard
               if (this.soundfontsLoaded && this.sfGuitar) {
                 this.sfGuitar.play(noteName, time, { duration })
               } else {
@@ -660,12 +776,14 @@ class AudioEngine {
               }
               break
             case 'melody':
-              // メロディはピアノ音源で再生
-              if (this.soundfontsLoaded && this.sfPiano) {
-                this.sfPiano.play(noteName, time, { duration })
-              } else {
-                this.keyboard?.triggerAttackRelease(noteName, duration, time)
-              }
+              // メロディ = sfMelody（acoustic_grand_piano・独立ゲインノード）
+              this.playInstrument('melody', freq, noteName, duration, time)
+              break
+            case 'guitar':
+              this.playInstrument('guitar', freq, noteName, duration, time)
+              break
+            case 'keyboard':
+              this.playInstrument('keyboard', freq, noteName, duration, time)
               break
           }
         }, adjustedStart)
@@ -678,6 +796,9 @@ class AudioEngine {
     scheduleTrack(tracks.bass, 'bass')
     scheduleTrack(tracks.other, 'other')
     scheduleTrack(tracks.melody, 'melody')
+    // htdemucs_6s 追加 stem（設計書 B-4）
+    scheduleTrack(tracks.guitar, 'guitar')
+    scheduleTrack(tracks.keyboard, 'keyboard')
 
     // 進捗コールバック（startFromを加算して実際の時間を返す）
     let progressInterval: number | null = null
@@ -689,12 +810,14 @@ class AudioEngine {
       }, 50)
     }
 
-    // 曲の終わりを検出
+    // 曲の終わりを検出（htdemucs_6s 追加 stem も含める）
     const allNotes = [
-      ...(tracks.drums || []),
-      ...(tracks.bass || []),
-      ...(tracks.other || []),
-      ...(tracks.melody || []),
+      ...(tracks.drums    || []),
+      ...(tracks.bass     || []),
+      ...(tracks.other    || []),
+      ...(tracks.melody   || []),
+      ...(tracks.guitar   || []),  // htdemucs_6s 追加
+      ...(tracks.keyboard || []),  // htdemucs_6s 追加
     ]
     const maxTime = allNotes.length > 0 ? Math.max(...allNotes.map((n) => n.end)) - startFrom + 1 : 0
 
@@ -741,13 +864,18 @@ class AudioEngine {
     this.drumSampler?.dispose()
     this.drumSamplesLoaded = false
 
-    // SoundFont楽器
+    // SoundFont楽器（メモリリーク防止: stop() 後 null 化）
     this.sfBass?.stop()
     this.sfPiano?.stop()
     this.sfGuitar?.stop()
+    this.sfMelody?.stop()
     this.sfBass = null
     this.sfPiano = null
     this.sfGuitar = null
+    this.sfMelody = null
+    // トラックGainNodeを切断
+    Object.values(this.analysisGainNodes).forEach((n) => n?.disconnect())
+    this.analysisGainNodes = { bass: null, guitar: null, keyboard: null, melody: null }
     this.soundfontsLoaded = false
 
     // シンセ楽器

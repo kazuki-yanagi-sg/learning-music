@@ -14,6 +14,7 @@ import {
   DEFAULT_PIANO_ROLL_CONFIG,
   pitchToNoteName,
 } from '../../types/music'
+import { LABEL_GUTTER_WIDTH } from '../../constants/pianoRollLayout'
 
 interface PianoRollProps {
   notes: Note[]
@@ -314,7 +315,7 @@ export function PianoRoll({
       {/* 小節番号ヘッダー */}
       <div
         className="sticky top-0 z-20 flex"
-        style={{ marginLeft: 48, width: gridWidth }}
+        style={{ marginLeft: LABEL_GUTTER_WIDTH, width: gridWidth }}
       >
         {bars.map((bar) => (
           <div
@@ -334,7 +335,7 @@ export function PianoRoll({
       {/* ピアノキー（左側） */}
       <div
         className="absolute left-0 z-10 bg-gray-800"
-        style={{ width: 48, height: gridHeight, top: 20 }}
+        style={{ width: LABEL_GUTTER_WIDTH, height: gridHeight, top: 20 }}
       >
         {pitches.map((pitch) => (
           <div
@@ -360,7 +361,7 @@ export function PianoRoll({
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
         className="cursor-crosshair"
-        style={{ marginLeft: 48 }}
+        style={{ marginLeft: LABEL_GUTTER_WIDTH }}
       >
         {/* 背景グリッド */}
         {pitches.map((pitch, pitchIndex) => (

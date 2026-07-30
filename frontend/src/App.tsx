@@ -26,7 +26,22 @@ const createInitialTracks = (): Track[] => [
 ]
 
 // アンドゥ履歴の最大数
-const MAX_UNDO_HISTORY = 50
+export const MAX_UNDO_HISTORY = 50
+
+/**
+ * アンドゥ履歴に積むトラック配列のスナップショットを作る。
+ *
+ * 不変条件:
+ *   ノート・notes 配列・track はどこでも in-place 変更されない。
+ *   編集系（PianoRoll / DrumGrid）は常に新しい notes 配列・新しい note を生成し
+ *   （notes.filter(...) / [...notes, newNote] / notes.map(...)）、
+ *   setTracks は変更トラックのみ新しい track オブジェクトで置換する（prev.map）。
+ *   そのため過去スナップショットが参照する track / notes は、後続の編集で
+ *   「別オブジェクトに置換されるだけで変異しない」。
+ *   → track を浅くコピーするだけで履歴の独立性が保たれ、ディープクローンは不要。
+ */
+export const snapshotTracks = (tracks: Track[]): Track[] =>
+  tracks.map((track) => ({ ...track }))
 
 function App() {
   const [tracks, setTracks] = useState<Track[]>(createInitialTracks)
@@ -62,7 +77,7 @@ function App() {
   const handleNotesChange = useCallback((trackId: string, newNotes: Note[]) => {
     setTracks((prev) => {
       // 現在の状態を履歴に保存
-      undoHistory.current.push(JSON.parse(JSON.stringify(prev)))
+      undoHistory.current.push(snapshotTracks(prev))
       // 履歴が最大数を超えたら古いものを削除
       if (undoHistory.current.length > MAX_UNDO_HISTORY) {
         undoHistory.current.shift()

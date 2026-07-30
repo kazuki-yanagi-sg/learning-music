@@ -6,6 +6,7 @@
  */
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { Note } from '../../types/music'
+import { LABEL_GUTTER_WIDTH } from '../../constants/pianoRollLayout'
 
 // ドラムキットの定義
 export const DRUM_SOUNDS = [
@@ -300,7 +301,7 @@ export function DrumGrid({
       {/* 小節番号ヘッダー */}
       <div
         className="sticky top-0 z-20 flex"
-        style={{ marginLeft: 80, width: gridWidth }}
+        style={{ marginLeft: LABEL_GUTTER_WIDTH, width: gridWidth }}
       >
         {bars.map((bar) => (
           <div
@@ -320,7 +321,7 @@ export function DrumGrid({
       {/* ドラム名ラベル（左側） */}
       <div
         className="absolute left-0 z-10 bg-gray-800"
-        style={{ width: 80, height: gridHeight, top: 20 }}
+        style={{ width: LABEL_GUTTER_WIDTH, height: gridHeight, top: 20 }}
       >
         {DRUM_SOUNDS.map((drum) => (
           <div
@@ -347,7 +348,7 @@ export function DrumGrid({
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
         className="cursor-crosshair"
-        style={{ marginLeft: 80 }}
+        style={{ marginLeft: LABEL_GUTTER_WIDTH }}
       >
         {/* 背景グリッド */}
         {DRUM_SOUNDS.map((drum, rowIndex) => (

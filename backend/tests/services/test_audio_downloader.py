@@ -77,3 +77,26 @@ class TestAudioDownloaderService:
         result = service.cleanup("/nonexistent/path/file.wav")
 
         assert result is False
+
+    def test_ytdlp_argv_uses_supported_js_runtime(self):
+        """yt-dlp の --js-runtimes に「サポートされている」ランタイムを指定する
+
+        回帰防止: 以前は --js-runtimes nodejs を渡していたが、yt-dlp が
+        対応する名称は deno/node/bun/quickjs であり "nodejs" は無視される。
+        無視されると YouTube の JS チャレンジ(n-sig)を解けず HTTP 403 になる。
+        サポート名（deno 等）を指定すること。
+        """
+        from app.services.audio_downloader import AudioDownloaderService
+
+        service = AudioDownloaderService()
+        argv = service._build_ytdlp_argv(
+            "https://www.youtube.com/watch?v=test123",
+            "/tmp/out.%(ext)s",
+        )
+        assert "--js-runtimes" in argv
+        runtime = argv[argv.index("--js-runtimes") + 1]
+        supported = {"deno", "node", "bun", "quickjs"}
+        assert runtime in supported, (
+            f"--js-runtimes に未対応の値 '{runtime}'。"
+            f"対応値 {supported} のいずれかを指定すること（nodejs は不可）"
+        )

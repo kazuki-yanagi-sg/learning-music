@@ -1,77 +1,41 @@
 """
 Gemini API サービス
 
-楽曲解析結果の解説生成、音声→ノート変換
+楽曲解析結果の解説生成
 """
-import json
+import logging
 import os
-import re
-from pathlib import Path
+import time
 from typing import Optional
 
+logger = logging.getLogger(__name__)
+
+# 一時的（リトライで回復しうる）なGemini APIエラーの判定キーワード。
+# gemini-2.5-flash は混雑時に 503 UNAVAILABLE / 429 を返すが、数秒後の再試行で回復する。
+_TRANSIENT_ERROR_KEYWORDS = (
+    "503",
+    "unavailable",
+    "overloaded",
+    "high demand",
+    "429",
+    "resource_exhausted",
+    "rate limit",
+    "deadline",
+    "timeout",
+)
+# リトライ回数と待機（指数バックオフ: 1s, 2s, 4s）
+_MAX_RETRIES = 3
+_BACKOFF_BASE_SECONDS = 1.0
+
 from app.prompts import (
+    get_system_prompt,
     SONG_ANALYSIS_PROMPT,
     CHORD_ADVICE_PROMPT,
     PROGRESSION_PATTERN_PROMPT,
-    AUDIO_TRANSCRIPTION_PROMPT,
-    TRANSCRIBE_DRUMS_PROMPT,
-    TRANSCRIBE_BASS_PROMPT,
-    TRANSCRIBE_OTHER_PROMPT,
 )
 
-# 範囲指定解説用プロンプト
-SECTION_ANALYSIS_PROMPT = """
-あなたは音楽理論の専門家です。以下の楽曲の指定区間について、初心者にもわかりやすく解説してください。
-
-## 楽曲情報
-- 曲名: {track_name}
-- テンポ: {tempo} BPM
-- 解析区間: {start_time:.1f}秒 〜 {end_time:.1f}秒
-
-## この区間のノート情報
-{notes_summary}
-
-## 解説してほしいこと
-1. この区間で使われている音楽的な特徴（コード、スケール、リズムパターンなど）
-2. アニソン/J-POPでよく使われるテクニックとの関連
-3. 作曲に活かせるポイント
-
-簡潔に、200〜300文字程度で解説してください。
-"""
-
-
-def _extract_json(text: str) -> dict:
-    """
-    テキストからJSON部分を抽出してパース
-
-    Args:
-        text: Geminiのレスポンステキスト
-
-    Returns:
-        パースされたdict
-
-    Raises:
-        json.JSONDecodeError: JSONパース失敗時
-    """
-    text = text.strip()
-
-    # ```json ... ``` で囲まれている場合
-    json_match = re.search(r'```json\s*([\s\S]*?)\s*```', text)
-    if json_match:
-        return json.loads(json_match.group(1))
-
-    # ``` ... ``` で囲まれている場合
-    code_match = re.search(r'```\s*([\s\S]*?)\s*```', text)
-    if code_match:
-        return json.loads(code_match.group(1))
-
-    # { ... } を直接探す
-    brace_match = re.search(r'\{[\s\S]*\}', text)
-    if brace_match:
-        return json.loads(brace_match.group(0))
-
-    # そのままパースを試みる
-    return json.loads(text)
+# 範囲指定解説用プロンプト（SYSTEM_SECTION_ANALYSIS.md から読み込み）
+SECTION_ANALYSIS_PROMPT = get_system_prompt("SECTION_ANALYSIS")
 
 
 class GeminiService:
@@ -86,6 +50,51 @@ class GeminiService:
         from google import genai
         self.client = genai.Client(api_key=api_key)
         self.model = "gemini-2.5-flash"
+
+    def _is_transient_error(self, error: Exception) -> bool:
+        """一時的（リトライで回復しうる）なエラーかを判定する（503/429/混雑等）"""
+        msg = str(error).lower()
+        return any(keyword in msg for keyword in _TRANSIENT_ERROR_KEYWORDS)
+
+    def _generate(self, prompt: str, failure_message: str) -> str:
+        """
+        プロンプトをGeminiに渡してテキストを生成する共通処理
+
+        gemini-2.5-flash は混雑時に 503 UNAVAILABLE を断続的に返すため、
+        一時的なエラーのときだけ指数バックオフで最大 _MAX_RETRIES 回リトライする。
+        恒久的なエラー（無効リクエスト等）は即座に失敗メッセージを返す。
+
+        Args:
+            prompt: Geminiに渡すプロンプト
+            failure_message: 失敗時に返すメッセージ（接頭辞）。
+                             "{接頭辞}: {例外文字列}" の形式で返す
+
+        Returns:
+            生成されたテキスト。失敗時は failure_message を含むエラーテキスト
+        """
+        last_error: Optional[Exception] = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                )
+                return response.text
+            except Exception as e:
+                last_error = e
+                # 一時的でないエラー、または最終試行なら即座に終了
+                if not self._is_transient_error(e) or attempt == _MAX_RETRIES - 1:
+                    break
+                # 指数バックオフで待機してから再試行（1s, 2s, 4s）
+                wait = _BACKOFF_BASE_SECONDS * (2 ** attempt)
+                logger.warning(
+                    "[Gemini] 一時的エラー（%d/%d回目）: %s。%.1f秒後に再試行",
+                    attempt + 1, _MAX_RETRIES, str(e), wait,
+                )
+                time.sleep(wait)
+
+        logger.error("[Gemini] 生成失敗: %s", str(last_error))
+        return f"{failure_message}: {str(last_error)}"
 
     async def generate_song_analysis(
         self,
@@ -132,14 +141,7 @@ class GeminiService:
             notes_count=notes_count,
         )
 
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-            )
-            return response.text
-        except Exception as e:
-            return f"解説の生成に失敗しました: {str(e)}"
+        return self._generate(prompt, "解説の生成に失敗しました")
 
     async def generate_section_analysis(
         self,
@@ -196,14 +198,7 @@ class GeminiService:
             notes_summary=notes_summary,
         )
 
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-            )
-            return response.text
-        except Exception as e:
-            return f"解説の生成に失敗しました: {str(e)}"
+        return self._generate(prompt, "解説の生成に失敗しました")
 
     async def generate_chord_advice(
         self,
@@ -227,14 +222,7 @@ class GeminiService:
             chord_progression=chord_str,
         )
 
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-            )
-            return response.text
-        except Exception as e:
-            return f"アドバイスの生成に失敗しました: {str(e)}"
+        return self._generate(prompt, "アドバイスの生成に失敗しました")
 
     async def explain_progression_pattern(
         self,
@@ -258,208 +246,7 @@ class GeminiService:
             degrees=degrees_str,
         )
 
-        try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-            )
-            return response.text
-        except Exception as e:
-            return f"解説の生成に失敗しました: {str(e)}"
-
-    def transcribe_audio(self, audio_path: str) -> dict:
-        """
-        音声ファイルからノート情報を抽出
-
-        Args:
-            audio_path: 音声ファイルのパス
-
-        Returns:
-            {
-                "success": True/False,
-                "tempo": テンポ（BPM）,
-                "notes": ノート情報のリスト,
-                "error": エラーメッセージ（失敗時）
-            }
-        """
-        audio_file = Path(audio_path)
-        if not audio_file.exists():
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": f"Audio file not found: {audio_path}",
-            }
-
-        # ファイルサイズチェック（空ファイルのみ拒否）
-        file_size = audio_file.stat().st_size
-        if file_size == 0:
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": "Audio file is empty",
-            }
-
-        try:
-            # 音声ファイルをアップロード（google-genaiのバグ回避）
-            try:
-                uploaded_file = self.client.files.upload(file=audio_file)
-            except ZeroDivisionError:
-                # google-genaiライブラリの進捗計算バグを回避
-                # ファイルパスを文字列で渡す
-                uploaded_file = self.client.files.upload(file=str(audio_file))
-
-            # Geminiで音声を分析
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=[
-                    AUDIO_TRANSCRIPTION_PROMPT,
-                    uploaded_file,
-                ],
-            )
-
-            # レスポンスをパース
-            data = _extract_json(response.text)
-
-            return {
-                "success": True,
-                "tempo": data.get("tempo", 120),
-                "notes": data.get("notes", []),
-                "error": None,
-            }
-
-        except json.JSONDecodeError as e:
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": f"Failed to parse Gemini response as JSON: {str(e)}",
-            }
-        except ZeroDivisionError:
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": "Gemini API upload error (library bug). Try a shorter audio file.",
-            }
-        except Exception as e:
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": f"Audio transcription failed: {str(e)}",
-            }
-
-    def transcribe_track(self, audio_path: str, track_type: str) -> dict:
-        """
-        楽器別にトラックをMIDI変換
-
-        Args:
-            audio_path: 分離された音声ファイルのパス
-            track_type: トラック種別（"drums", "bass", "other", "vocals"）
-
-        Returns:
-            {
-                "success": True/False,
-                "tempo": テンポ（BPM）,
-                "notes": ノート情報のリスト,
-                "error": エラーメッセージ（失敗時）
-            }
-        """
-        # ボーカルは作曲学習では使わない
-        if track_type == "vocals":
-            return {
-                "success": True,
-                "tempo": 120,
-                "notes": [],
-                "error": None,
-            }
-
-        # 楽器別プロンプトを選択
-        prompts = {
-            "drums": TRANSCRIBE_DRUMS_PROMPT,
-            "bass": TRANSCRIBE_BASS_PROMPT,
-            "other": TRANSCRIBE_OTHER_PROMPT,
-        }
-        prompt = prompts.get(track_type, AUDIO_TRANSCRIPTION_PROMPT)
-
-        audio_file = Path(audio_path)
-        if not audio_file.exists():
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": f"Audio file not found: {audio_path}",
-            }
-
-        # ファイルサイズチェック（空ファイルのみ拒否）
-        file_size = audio_file.stat().st_size
-        if file_size == 0:
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": f"Audio file is empty: {track_type}",
-            }
-
-        try:
-            # 音声ファイルをアップロード（google-genaiのバグ回避）
-            try:
-                uploaded_file = self.client.files.upload(file=audio_file)
-            except ZeroDivisionError:
-                uploaded_file = self.client.files.upload(file=str(audio_file))
-
-            # Geminiで音声を分析
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=[
-                    prompt,
-                    uploaded_file,
-                ],
-            )
-
-            # デバッグ用ログ
-            print(f"[DEBUG] {track_type} track response (first 500 chars):")
-            print(response.text[:500] if response.text else "Empty response")
-
-            # レスポンスをパース
-            data = _extract_json(response.text)
-
-            print(f"[DEBUG] {track_type} parsed notes count: {len(data.get('notes', []))}")
-
-            return {
-                "success": True,
-                "tempo": data.get("tempo", 120),
-                "notes": data.get("notes", []),
-                "error": None,
-            }
-
-        except json.JSONDecodeError as e:
-            print(f"[ERROR] {track_type} JSON parse error: {str(e)}")
-            print(f"[ERROR] Response text (last 200 chars): {response.text[-200:] if response.text else 'None'}")
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": f"Failed to parse response as JSON: {str(e)}",
-            }
-        except ZeroDivisionError:
-            print(f"[ERROR] {track_type} ZeroDivisionError (google-genai bug)")
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": f"Gemini API upload error for {track_type} (library bug)",
-            }
-        except Exception as e:
-            print(f"[ERROR] {track_type} exception: {type(e).__name__}: {str(e)}")
-            return {
-                "success": False,
-                "tempo": None,
-                "notes": [],
-                "error": f"Track transcription failed: {str(e)}",
-            }
+        return self._generate(prompt, "解説の生成に失敗しました")
 
 
 # シングルトンインスタンス

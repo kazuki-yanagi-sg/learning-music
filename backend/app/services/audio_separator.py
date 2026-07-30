@@ -1,8 +1,10 @@
 """
 音声楽器分離サービス
 
-Demucsを使用して音声を4トラック（drums, bass, vocals, other）に分離
+Demucsを使用して音声を6トラック（drums, bass, other, vocals, guitar, piano）に分離。
+htdemucs_6s モデルを使用（htdemucs の 4stem より guitar/piano を個別に分離）。
 """
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -15,6 +17,12 @@ import numpy as np
 
 from demucs import pretrained
 from demucs.apply import apply_model
+
+logger = logging.getLogger(__name__)
+
+# 使用する Demucs モデル名（設計書 A-1）
+# htdemucs_6s: 6-stem モデル（drums/bass/other/vocals/guitar/piano）
+_DEMUCS_MODEL_NAME = "htdemucs_6s"
 
 
 class AudioSeparatorService:
@@ -42,10 +50,15 @@ class AudioSeparatorService:
 
     @property
     def model(self):
-        """モデルを遅延ロード"""
+        """モデルを遅延ロード
+
+        htdemucs_6s: Hybrid Transformer Demucs 6-stem モデル。
+        htdemucs（4stem）より guitar/piano を個別分離するため 6stem を使用。
+        分離される stem: drums / bass / other / vocals / guitar / piano
+        """
         if self._model is None:
-            # htdemucs: Hybrid Transformer Demucs（高品質）
-            self._model = pretrained.get_model("htdemucs")
+            # モデル名は定数 _DEMUCS_MODEL_NAME で管理（変更容易性）
+            self._model = pretrained.get_model(_DEMUCS_MODEL_NAME)
             self._model.to(self.device)
         return self._model
 
@@ -62,11 +75,15 @@ class AudioSeparatorService:
                 "tracks": {
                     "drums": ドラムトラックのパス,
                     "bass": ベーストラックのパス,
+                    "other": その他トラックのパス,
                     "vocals": ボーカルトラックのパス,
-                    "other": その他（ギター等）トラックのパス,
+                    "guitar": ギタートラックのパス（htdemucs_6s）,
+                    "piano": ピアノトラックのパス（htdemucs_6s）,
                 },
                 "error": エラーメッセージ（失敗時）
             }
+            ※ model.sources を動的取得し名前引きで格納するため、
+              モデルが返す stem 数に関わらず正しくマップされる。
         """
         audio_path = Path(audio_path)
         if not audio_path.exists():
@@ -128,7 +145,7 @@ class AudioSeparatorService:
                 # デバッグ用ログ
                 file_size = track_path.stat().st_size / 1024 / 1024
                 duration = track_audio.shape[0] / sr
-                print(f"[DEBUG] Saved {name} track: {track_path} ({file_size:.2f}MB, {duration:.1f}s)")
+                logger.debug(f"[DEBUG] Saved {name} track: {track_path} ({file_size:.2f}MB, {duration:.1f}s)")
 
             return {
                 "success": True,
@@ -137,10 +154,16 @@ class AudioSeparatorService:
             }
 
         except Exception as e:
+            # 元例外の型・メッセージ・スタックトレースをログに残す（握りつぶさない）。
+            # 上流(magenta)で再ラップされると元情報が潰れるため、ここで全容を記録する。
+            logger.exception("[Separator] separation で例外が発生しました")
+            # エラー文字列に例外型名を含め、空/曖昧メッセージ（"System error." 等）でも
+            # 何の例外かが分かるようにする。
+            detail = str(e).strip() or "(no message)"
             return {
                 "success": False,
                 "tracks": {},
-                "error": f"Separation failed: {str(e)}",
+                "error": f"{type(e).__name__}: {detail}",
             }
 
     def cleanup(self, tracks: dict) -> None:

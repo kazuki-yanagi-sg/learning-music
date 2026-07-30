@@ -46,7 +46,13 @@ async def root():
     return {"status": "ok", "message": "アニソン作曲学習API"}
 
 
+# ヘルスチェックは複数パスのエイリアスとして同一応答を返す。
+# /health（既存）に加え、外部プローブが叩く /api/health と
+# 業務API慣習の /api/v1/health でも 404 にならないようにする。
+# 同一ハンドラを複数パスに割り当て、重複実装を避ける（DRY）。
 @app.get("/health")
+@app.get("/api/health")
+@app.get("/api/v1/health")
 async def health():
     """ヘルスチェック"""
     return {"status": "healthy"}

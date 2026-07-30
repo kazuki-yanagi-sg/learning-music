@@ -140,114 +140,54 @@ class TestGeminiService:
             assert "失敗しました" in result
             assert "API Error" in result
 
-    def test_transcribe_audio_file_not_found(self):
-        """存在しない音声ファイルはエラー"""
+    @pytest.mark.asyncio
+    async def test_generate_retries_on_transient_error(self):
+        """一時的な503エラーはリトライして成功する"""
+        mock_client = MagicMock()
+        mock_response = Mock()
+        mock_response.text = "リトライ後の解説文"
+        # 1回目は503、2回目は成功
+        mock_client.models.generate_content.side_effect = [
+            Exception("503 UNAVAILABLE. This model is currently experiencing high demand."),
+            mock_response,
+        ]
+
         with patch.dict("os.environ", {"GEMINI_API_KEY": "test-api-key"}):
-            from app.services.gemini import GeminiService
-
-            service = GeminiService.__new__(GeminiService)
-            service.client = MagicMock()
-            service.model = "gemini-2.5-flash"
-
-            result = service.transcribe_audio("/nonexistent/audio.wav")
-
-            assert result["success"] is False
-            assert "not found" in result["error"].lower()
-
-    def test_transcribe_audio_success(self):
-        """音声ファイルの解析が成功"""
-        import tempfile
-        import os
-
-        mock_client = MagicMock()
-        mock_uploaded_file = MagicMock()
-        mock_client.files.upload.return_value = mock_uploaded_file
-
-        mock_response = Mock()
-        mock_response.text = '{"tempo": 140, "notes": [{"pitch": 60, "start": 0.0, "end": 0.5, "velocity": 80}]}'
-        mock_client.models.generate_content.return_value = mock_response
-
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            temp_path = f.name
-            f.write(b"dummy audio data")
-
-        try:
-            with patch.dict("os.environ", {"GEMINI_API_KEY": "test-api-key"}):
+            with patch("app.services.gemini.time.sleep"):  # バックオフ待機をスキップ
                 from app.services.gemini import GeminiService
 
                 service = GeminiService.__new__(GeminiService)
                 service.client = mock_client
                 service.model = "gemini-2.5-flash"
 
-                result = service.transcribe_audio(temp_path)
+                result = await service.generate_song_analysis(
+                    track_name="テスト", artist="テスト", key="C", mode="major",
+                    tempo=120, chords=[], notes_count=0,
+                )
 
-                assert result["success"] is True
-                assert result["tempo"] == 140
-                assert len(result["notes"]) == 1
-                assert result["notes"][0]["pitch"] == 60
-        finally:
-            os.unlink(temp_path)
+                assert result == "リトライ後の解説文"
+                assert mock_client.models.generate_content.call_count == 2
 
-    def test_transcribe_audio_json_with_markdown(self):
-        """マークダウンで囲まれたJSONレスポンスを処理"""
-        import tempfile
-        import os
-
+    @pytest.mark.asyncio
+    async def test_generate_does_not_retry_on_permanent_error(self):
+        """恒久的なエラーはリトライせず即座に失敗を返す"""
         mock_client = MagicMock()
-        mock_uploaded_file = MagicMock()
-        mock_client.files.upload.return_value = mock_uploaded_file
+        mock_client.models.generate_content.side_effect = Exception("400 INVALID_ARGUMENT")
 
-        mock_response = Mock()
-        mock_response.text = '```json\n{"tempo": 120, "notes": []}\n```'
-        mock_client.models.generate_content.return_value = mock_response
-
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            temp_path = f.name
-            f.write(b"dummy audio data")
-
-        try:
-            with patch.dict("os.environ", {"GEMINI_API_KEY": "test-api-key"}):
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test-api-key"}):
+            with patch("app.services.gemini.time.sleep") as mock_sleep:
                 from app.services.gemini import GeminiService
 
                 service = GeminiService.__new__(GeminiService)
                 service.client = mock_client
                 service.model = "gemini-2.5-flash"
 
-                result = service.transcribe_audio(temp_path)
+                result = await service.generate_song_analysis(
+                    track_name="テスト", artist="テスト", key="C", mode="major",
+                    tempo=120, chords=[], notes_count=0,
+                )
 
-                assert result["success"] is True
-                assert result["tempo"] == 120
-        finally:
-            os.unlink(temp_path)
-
-    def test_transcribe_audio_invalid_json(self):
-        """無効なJSONレスポンスはエラー"""
-        import tempfile
-        import os
-
-        mock_client = MagicMock()
-        mock_uploaded_file = MagicMock()
-        mock_client.files.upload.return_value = mock_uploaded_file
-
-        mock_response = Mock()
-        mock_response.text = "これはJSONではありません"
-        mock_client.models.generate_content.return_value = mock_response
-
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            temp_path = f.name
-            f.write(b"dummy audio data")
-
-        try:
-            with patch.dict("os.environ", {"GEMINI_API_KEY": "test-api-key"}):
-                from app.services.gemini import GeminiService
-
-                service = GeminiService.__new__(GeminiService)
-                service.client = mock_client
-                service.model = "gemini-2.5-flash"
-
-                result = service.transcribe_audio(temp_path)
-
-                assert result["success"] is False
-                assert "JSON" in result["error"]
-        finally:
-            os.unlink(temp_path)
+                assert "失敗しました" in result
+                # 恒久エラーは1回だけ呼ばれ、sleep（リトライ待機）は発生しない
+                assert mock_client.models.generate_content.call_count == 1
+                mock_sleep.assert_not_called()

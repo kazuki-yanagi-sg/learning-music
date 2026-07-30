@@ -22,7 +22,10 @@ basic-pitch[coreml]>=0.3.0
 librosa>=0.10.0
 
 # Chord Recognition
-autochord>=0.1.0
+# NOTE: autochord は本アプリ未使用の任意依存。依存先 vamp が build isolation 下で
+#   numpy を見つけられずビルドに失敗するため除外（start.sh でも自動インストールは無効）。
+#   必要なら `pip install --no-build-isolation vamp autochord` を手動で実施。
+# autochord>=0.1.0
 
 # Audio Source Separation
 # NOTE: demucs, torch, torchaudio は start.sh で個別インストール

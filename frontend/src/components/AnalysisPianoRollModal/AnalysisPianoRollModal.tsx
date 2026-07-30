@@ -7,8 +7,15 @@
  */
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
 import { AnalysisResult, FourTrackResult, NoteInfo, explainSection } from '../../services/songAnalysisApi'
-import { audioEngine } from '../../services/audioEngine'
 import { AnalysisDrumGrid } from './AnalysisDrumGrid'
+import { useDragSelection } from './useDragSelection'
+import { useAnalysisPlayback } from './useAnalysisPlayback'
+import { TrackPianoRoll, TrackType } from './TrackPianoRoll'
+import {
+  computeMutedFromVolumes,
+  PLAYABLE_TRACKS,
+  DEFAULT_TRACK_VOLUME,
+} from './trackControls'
 
 interface AnalysisPianoRollModalProps {
   isOpen: boolean
@@ -21,298 +28,6 @@ function isFourTrackResult(result: AnalysisResult | FourTrackResult): result is 
   return 'tracks' in result
 }
 
-// トラック設定
-const TRACK_CONFIG = {
-  drums: {
-    label: 'Drums',
-    color: '#ef4444',
-    bgColor: '#7f1d1d',
-    defaultPitchRange: { min: 35, max: 52 }, // ドラム用MIDI範囲
-  },
-  bass: {
-    label: 'Bass',
-    color: '#22c55e',
-    bgColor: '#14532d',
-    defaultPitchRange: { min: 28, max: 55 }, // ベース用
-  },
-  other: {
-    label: 'Guitar/Keys',
-    color: '#3b82f6',
-    bgColor: '#1e3a8a',
-    defaultPitchRange: { min: 48, max: 84 }, // コード楽器用
-  },
-  melody: {
-    label: 'Melody',
-    color: '#f59e0b',  // オレンジ系（ボーカルメロディを強調）
-    bgColor: '#78350f',
-    defaultPitchRange: { min: 48, max: 84 }, // ボーカル音域
-  },
-} as const
-
-type TrackType = keyof typeof TRACK_CONFIG
-
-// ピッチ名変換
-function pitchToNoteName(pitch: number): string {
-  const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-  const octave = Math.floor(pitch / 12) - 1
-  const note = noteNames[pitch % 12]
-  return `${note}${octave}`
-}
-
-// 黒鍵判定
-function isBlackKey(pitch: number): boolean {
-  return [1, 3, 6, 8, 10].includes(pitch % 12)
-}
-
-// 単一トラックのピアノロール
-interface TrackPianoRollProps {
-  trackType: TrackType
-  notes: NoteInfo[]
-  maxTime: number
-  zoom: number
-  playbackTime: number
-  isPlaying: boolean
-  isMuted: boolean
-  onToggleMute: () => void
-  onSeek?: (time: number) => void
-  // ドラッグ選択
-  onDragStart?: (time: number) => void
-  onDragMove?: (time: number) => void
-  onDragEnd?: () => void
-  selectionStart?: number | null
-  selectionEnd?: number | null
-}
-
-function TrackPianoRoll({
-  trackType,
-  notes,
-  maxTime,
-  zoom,
-  playbackTime,
-  isPlaying,
-  isMuted,
-  onToggleMute,
-  onSeek,
-  onDragStart,
-  onDragMove,
-  onDragEnd,
-  selectionStart,
-  selectionEnd,
-}: TrackPianoRollProps) {
-  const config = TRACK_CONFIG[trackType]
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  // このトラックの音域を計算
-  const { min: minPitch, max: maxPitch } = useMemo(() => {
-    if (notes.length === 0) {
-      return config.defaultPitchRange
-    }
-    const pitches = notes.map(n => n.pitch)
-    return {
-      min: Math.max(0, Math.min(...pitches) - 2),
-      max: Math.min(127, Math.max(...pitches) + 2),
-    }
-  }, [notes, config.defaultPitchRange])
-
-  const noteHeight = 8
-  const pixelsPerSecond = 80 * zoom
-
-  const pitches = useMemo(() => {
-    const result: number[] = []
-    for (let p = maxPitch; p >= minPitch; p--) {
-      result.push(p)
-    }
-    return result
-  }, [minPitch, maxPitch])
-
-  const gridHeight = pitches.length * noteHeight
-  const gridWidth = maxTime * pixelsPerSecond
-
-  // 秒数マーカー（5秒ごと）
-  const timeMarkers = useMemo(() => {
-    const markers: number[] = []
-    for (let t = 0; t <= maxTime; t += 5) {
-      markers.push(t)
-    }
-    return markers
-  }, [maxTime])
-
-  // プレイヘッドの自動スクロール
-  useEffect(() => {
-    if (isPlaying && containerRef.current) {
-      const scrollLeft = playbackTime * pixelsPerSecond - containerRef.current.clientWidth / 2
-      containerRef.current.scrollLeft = Math.max(0, scrollLeft)
-    }
-  }, [isPlaying, playbackTime, pixelsPerSecond])
-
-  return (
-    <div className={`flex flex-col border-b border-gray-700 ${isMuted ? 'opacity-40' : ''}`}>
-      {/* トラックヘッダー */}
-      <div
-        className="flex items-center justify-between px-3 py-1 border-b border-gray-600"
-        style={{ backgroundColor: config.bgColor }}
-      >
-        <div className="flex items-center gap-2">
-          <span
-            className="w-3 h-3 rounded-full"
-            style={{ backgroundColor: config.color }}
-          />
-          <span className="text-sm font-bold text-white">{config.label}</span>
-          <span className="text-xs text-white/70">({notes.length} notes)</span>
-        </div>
-        <button
-          onClick={onToggleMute}
-          className={`px-2 py-0.5 rounded text-xs font-bold ${
-            isMuted
-              ? 'bg-gray-600 text-gray-300'
-              : 'bg-white/20 text-white hover:bg-white/30'
-          }`}
-        >
-          {isMuted ? 'MUTED' : 'M'}
-        </button>
-      </div>
-
-      {/* ピアノロール */}
-      <div className="flex" style={{ height: gridHeight + 20 }}>
-        {/* ピアノキー */}
-        <div className="flex-shrink-0 bg-gray-800" style={{ width: 40 }}>
-          {pitches.map((pitch) => (
-            <div
-              key={pitch}
-              className={`flex items-center justify-end pr-1 text-[10px] border-b border-gray-700 ${
-                isBlackKey(pitch) ? 'bg-gray-900 text-gray-500' : 'bg-gray-700 text-gray-400'
-              }`}
-              style={{ height: noteHeight }}
-            >
-              {pitch % 12 === 0 ? pitchToNoteName(pitch) : ''}
-            </div>
-          ))}
-        </div>
-
-        {/* グリッド（クリック=シーク、ドラッグ=範囲選択） */}
-        <div ref={containerRef} className="flex-1 overflow-x-auto overflow-y-hidden">
-          <svg
-            width={gridWidth}
-            height={gridHeight}
-            className="block cursor-crosshair select-none"
-            onMouseDown={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect()
-              const x = e.clientX - rect.left + (containerRef.current?.scrollLeft || 0)
-              const time = Math.max(0, Math.min(x / pixelsPerSecond, maxTime))
-              onDragStart?.(time)
-            }}
-            onMouseMove={(e) => {
-              if (!onDragMove) return
-              const rect = e.currentTarget.getBoundingClientRect()
-              const x = e.clientX - rect.left + (containerRef.current?.scrollLeft || 0)
-              const time = Math.max(0, Math.min(x / pixelsPerSecond, maxTime))
-              onDragMove(time)
-            }}
-            onMouseUp={(e) => {
-              // ドラッグ距離が短ければクリック扱い（シーク）
-              const start = selectionStart ?? 0
-              const end = selectionEnd ?? 0
-              const distance = Math.abs(end - start)
-              if (distance < 0.5 && onSeek) {
-                const rect = e.currentTarget.getBoundingClientRect()
-                const x = e.clientX - rect.left + (containerRef.current?.scrollLeft || 0)
-                const time = Math.max(0, Math.min(x / pixelsPerSecond, maxTime))
-                onSeek(time)
-              }
-              onDragEnd?.()
-            }}
-            onMouseLeave={() => onDragEnd?.()}
-          >
-            {/* 背景 */}
-            {pitches.map((pitch, idx) => (
-              <rect
-                key={pitch}
-                x={0}
-                y={idx * noteHeight}
-                width={gridWidth}
-                height={noteHeight}
-                fill={isBlackKey(pitch) ? '#1a1a2e' : '#16213e'}
-                stroke="#333"
-                strokeWidth={0.3}
-              />
-            ))}
-
-            {/* 時間線 */}
-            {timeMarkers.map((t) => (
-              <g key={t}>
-                <line
-                  x1={t * pixelsPerSecond}
-                  y1={0}
-                  x2={t * pixelsPerSecond}
-                  y2={gridHeight}
-                  stroke="#444"
-                  strokeWidth={1}
-                />
-                <text
-                  x={t * pixelsPerSecond + 2}
-                  y={10}
-                  fill="#666"
-                  fontSize={9}
-                >
-                  {Math.floor(t / 60)}:{String(t % 60).padStart(2, '0')}
-                </text>
-              </g>
-            ))}
-
-            {/* ノート */}
-            {notes.map((note, i) => {
-              const pitchIndex = pitches.indexOf(note.pitch)
-              if (pitchIndex === -1) return null
-
-              const x = note.start * pixelsPerSecond
-              const y = pitchIndex * noteHeight
-              const width = Math.max(2, (note.end - note.start) * pixelsPerSecond - 1)
-
-              return (
-                <rect
-                  key={i}
-                  x={x}
-                  y={y + 1}
-                  width={width}
-                  height={noteHeight - 2}
-                  rx={1}
-                  fill={config.color}
-                  opacity={0.9}
-                />
-              )
-            })}
-
-            {/* 選択範囲 */}
-            {selectionStart != null && selectionEnd != null && Math.abs(selectionEnd - selectionStart) > 0.1 && (
-              <rect
-                x={Math.min(selectionStart, selectionEnd) * pixelsPerSecond}
-                y={0}
-                width={Math.abs(selectionEnd - selectionStart) * pixelsPerSecond}
-                height={gridHeight}
-                fill="rgba(168, 85, 247, 0.3)"
-                stroke="#a855f7"
-                strokeWidth={1}
-              />
-            )}
-
-            {/* プレイヘッド（常に表示） */}
-            {playbackTime > 0 && (
-              <line
-                x1={playbackTime * pixelsPerSecond}
-                y1={0}
-                x2={playbackTime * pixelsPerSecond}
-                y2={gridHeight}
-                stroke={isPlaying ? '#fff' : '#888'}
-                strokeWidth={2}
-              />
-            )}
-          </svg>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export function AnalysisPianoRollModal({
   isOpen,
   onClose,
@@ -320,13 +35,16 @@ export function AnalysisPianoRollModal({
 }: AnalysisPianoRollModalProps) {
   const modalRef = useRef<HTMLDivElement>(null)
   const [zoom, setZoom] = useState(1)
-  const [mutedTracks, setMutedTracks] = useState<Set<string>>(new Set())
+  // トラック別ボリューム（0..1.5、既定 1）。UI は音量スライダーのみ。
+  // ソロ/ミュートボタンは廃止し、スライダーを 0 にすれば実質ミュート＝
+  // 聴きたいトラック以外を 0 にすればソロ相当。
+  const [trackVolumes, setTrackVolumes] = useState<Record<string, number>>({})
 
-  // 再生状態
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [playbackTime, setPlaybackTime] = useState(0)
-  const playbackRef = useRef<{ stop: () => void; seek?: (time: number) => void } | null>(null)
-  const [audioInitialized, setAudioInitialized] = useState(false)
+  // 音量0のトラックは鳴らさない（実効ミュート）。これを再生に渡す。
+  const effectiveMuted = useMemo(
+    () => computeMutedFromVolumes(PLAYABLE_TRACKS, trackVolumes),
+    [trackVolumes],
+  )
 
   // トラックデータをrefで保持（シーク時に参照）
   const tracksDataRef = useRef<typeof tracksData | null>(null)
@@ -336,18 +54,41 @@ export function AnalysisPianoRollModal({
   const [isAnalyzing, setIsAnalyzing] = useState(false)
 
   // 範囲選択（ドラッグ）
-  const [selectionStart, setSelectionStart] = useState<number | null>(null)
-  const [selectionEnd, setSelectionEnd] = useState<number | null>(null)
-  const [isDragging, setIsDragging] = useState(false)
+  const {
+    selectionStart,
+    selectionEnd,
+    handleDragStart,
+    handleDragMove,
+    handleDragEnd,
+    clearSelection,
+  } = useDragSelection()
 
-  // トラックデータ
+  // 再生まわり（init/play4TrackAnalysis/playAnalysisNotes/stop の呼び出しを保持）
+  const {
+    isPlaying,
+    playbackTime,
+    handlePlayToggle,
+    handleSeek,
+    setTrackVolume: applyTrackVolume,
+  } = useAnalysisPlayback({
+    result,
+    mutedTracks: effectiveMuted,
+    isOpen,
+    clearSelection,
+  })
+
+  // トラックデータ（htdemucs_6s: guitar/keyboard を追加）
+  // other は後方互換のため保持するが描画リストには含めない
+  // melody は描画リストに追加（bass/guitar/keyboard/melody の4トラックを表示）
   const tracksData = useMemo(() => {
     if (isFourTrackResult(result)) {
       return {
-        drums: result.tracks.drums?.notes || [],
-        bass: result.tracks.bass?.notes || [],
-        other: result.tracks.other?.notes || [],
-        melody: result.tracks.melody?.notes || [],  // ボーカルメロディ
+        drums:    result.tracks.drums?.notes    || [],
+        bass:     result.tracks.bass?.notes     || [],
+        other:    result.tracks.other?.notes    || [],  // 描画しないが maxTime 計算に使う
+        melody:   result.tracks.melody?.notes   || [],  // 描画対象（ピアノロールで表示）
+        guitar:   result.tracks.guitar?.notes   || [],  // htdemucs_6s 追加
+        keyboard: result.tracks.keyboard?.notes || [],  // htdemucs_6s 追加（piano stem）
       }
     }
     return { default: result.notes || [] }
@@ -366,50 +107,17 @@ export function AnalysisPianoRollModal({
     tracksDataRef.current = tracksData
   }, [tracksData])
 
-  // ミュート切り替え
-  const toggleMute = useCallback((trackType: string) => {
-    setMutedTracks(prev => {
-      const next = new Set(prev)
-      if (next.has(trackType)) {
-        next.delete(trackType)
-      } else {
-        next.add(trackType)
-      }
-      return next
-    })
-  }, [])
+  // 音量変更（state 更新＋エンジンへリアルタイム反映）
+  const handleVolumeChange = useCallback((trackType: string, volume: number) => {
+    setTrackVolumes(prev => ({ ...prev, [trackType]: volume }))
+    applyTrackVolume?.(trackType, volume)
+  }, [applyTrackVolume])
 
-  // クリック = 位置セットのみ（再生しない）
-  const handleSeek = useCallback((time: number) => {
-    // 再生中なら停止
-    if (isPlaying) {
-      playbackRef.current?.stop()
-      setIsPlaying(false)
-    }
-    setPlaybackTime(time)
-    // 範囲選択をクリア
-    setSelectionStart(null)
-    setSelectionEnd(null)
-  }, [isPlaying])
-
-  // ドラッグ開始
-  const handleDragStart = useCallback((time: number) => {
-    setIsDragging(true)
-    setSelectionStart(time)
-    setSelectionEnd(time)
-  }, [])
-
-  // ドラッグ中
-  const handleDragMove = useCallback((time: number) => {
-    if (isDragging) {
-      setSelectionEnd(time)
-    }
-  }, [isDragging])
-
-  // ドラッグ終了
-  const handleDragEnd = useCallback(() => {
-    setIsDragging(false)
-  }, [])
+  // トラックの現在ボリュームを引く（未設定は既定値）
+  const volumeOf = useCallback(
+    (trackType: string) => trackVolumes[trackType] ?? DEFAULT_TRACK_VOLUME,
+    [trackVolumes],
+  )
 
   // 選択範囲を計算（ドラッグ選択 or 現在位置±5秒）
   const analysisRange = useMemo(() => {
@@ -461,59 +169,6 @@ export function AnalysisPianoRollModal({
       setIsAnalyzing(false)
     }
   }, [result, analysisRange])
-
-  // 再生/停止（現在位置から開始）
-  const handlePlayToggle = useCallback(async () => {
-    if (isPlaying) {
-      playbackRef.current?.stop()
-      playbackRef.current = null
-      setIsPlaying(false)
-    } else {
-      if (!audioInitialized) {
-        await audioEngine.init()
-        setAudioInitialized(true)
-      }
-
-      const onProgress = (time: number) => {
-        setPlaybackTime(time)
-        if (time === 0) setIsPlaying(false)
-      }
-
-      if (isFourTrackResult(result)) {
-        playbackRef.current = audioEngine.play4TrackAnalysis(
-          {
-            drums: mutedTracks.has('drums') ? [] : result.tracks.drums?.notes,
-            bass: mutedTracks.has('bass') ? [] : result.tracks.bass?.notes,
-            other: mutedTracks.has('other') ? [] : result.tracks.other?.notes,
-            melody: mutedTracks.has('melody') ? [] : result.tracks.melody?.notes,
-          },
-          mutedTracks,
-          onProgress,
-          playbackTime  // 現在位置から再生
-        )
-      } else {
-        playbackRef.current = audioEngine.playAnalysisNotes(
-          result.notes || [],
-          'default',
-          onProgress
-        )
-      }
-      setIsPlaying(true)
-    }
-  }, [isPlaying, audioInitialized, result, mutedTracks, playbackTime])
-
-  // クリーンアップ
-  useEffect(() => {
-    return () => { playbackRef.current?.stop() }
-  }, [])
-
-  useEffect(() => {
-    if (!isOpen && isPlaying) {
-      playbackRef.current?.stop()
-      setIsPlaying(false)
-      setPlaybackTime(0)
-    }
-  }, [isOpen, isPlaying])
 
   // キーボードショートカット
   useEffect(() => {
@@ -642,34 +297,20 @@ export function AnalysisPianoRollModal({
         {/* トラック別ピアノロール */}
         <div className="flex-1 overflow-y-auto">
           {is4Track ? (
-            // 4トラック表示
+            // 6トラック表示（htdemucs_6s 対応）
+            // 描画リスト: bass / guitar / keyboard / melody
+            // other は描画しない（guitar/keyboard で代替）
+            // drums は AnalysisDrumGrid で別途描画
             <>
-              {/* メロディ（ボーカル）は一番上に表示 */}
-              <TrackPianoRoll
-                trackType="melody"
-                notes={tracksData.melody || []}
-                maxTime={maxTime}
-                zoom={zoom}
-                playbackTime={playbackTime}
-                isPlaying={isPlaying}
-                isMuted={mutedTracks.has('melody')}
-                onToggleMute={() => toggleMute('melody')}
-                onSeek={handleSeek}
-                onDragStart={handleDragStart}
-                onDragMove={handleDragMove}
-                onDragEnd={handleDragEnd}
-                selectionStart={selectionStart}
-                selectionEnd={selectionEnd}
-              />
-              {/* ドラムは専用グリッド */}
+              {/* ドラムは専用グリッド（常に表示） */}
               <AnalysisDrumGrid
                 notes={tracksData.drums || []}
                 maxTime={maxTime}
                 zoom={zoom}
                 playbackTime={playbackTime}
                 isPlaying={isPlaying}
-                isMuted={mutedTracks.has('drums')}
-                onToggleMute={() => toggleMute('drums')}
+                volume={volumeOf('drums')}
+                onVolumeChange={(v) => handleVolumeChange('drums', v)}
                 tempo={result.tempo || 120}
                 onSeek={handleSeek}
                 onDragStart={handleDragStart}
@@ -678,9 +319,9 @@ export function AnalysisPianoRollModal({
                 selectionStart={selectionStart}
                 selectionEnd={selectionEnd}
               />
-              {/* ベース・その他はピアノロール */}
-              {(['bass', 'other'] as TrackType[]).map(trackType => {
-                const notes = tracksData[trackType] || []
+              {/* bass / guitar / keyboard / melody をピアノロールで描画 */}
+              {(['bass', 'guitar', 'keyboard', 'melody'] as TrackType[]).map(trackType => {
+                const notes = tracksData[trackType as keyof typeof tracksData] || []
                 return (
                   <TrackPianoRoll
                     key={trackType}
@@ -690,8 +331,8 @@ export function AnalysisPianoRollModal({
                     zoom={zoom}
                     playbackTime={playbackTime}
                     isPlaying={isPlaying}
-                    isMuted={mutedTracks.has(trackType)}
-                    onToggleMute={() => toggleMute(trackType)}
+                    volume={volumeOf(trackType)}
+                    onVolumeChange={(v) => handleVolumeChange(trackType, v)}
                     onSeek={handleSeek}
                     onDragStart={handleDragStart}
                     onDragMove={handleDragMove}
@@ -711,8 +352,6 @@ export function AnalysisPianoRollModal({
               zoom={zoom}
               playbackTime={playbackTime}
               isPlaying={isPlaying}
-              isMuted={false}
-              onToggleMute={() => {}}
               onSeek={handleSeek}
               onDragStart={handleDragStart}
               onDragMove={handleDragMove}
@@ -725,7 +364,7 @@ export function AnalysisPianoRollModal({
 
         {/* フッター */}
         <div className="px-4 py-2 border-t border-gray-700 bg-gray-800 text-xs text-gray-400">
-          Space: Play/Stop | Click: 位置移動 | Drag: 範囲選択 | M: Mute
+          Space: Play/Stop | Click: 位置移動 | Drag: 範囲選択 | 🔊 各トラックの音量で調整（0で消音）
         </div>
       </div>
     </div>
